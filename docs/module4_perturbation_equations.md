@@ -117,13 +117,27 @@ being multiplied by the material contrast.
 
 ### 1.4 Complex frequency-shift formula
 
-$$\Delta \equiv \frac{\tilde\omega_{\text{sample-only}}-\omega_0}{\omega_0} = -\frac{1}{2}\Big[(\epsilon_r-1)\,p_E + (\mu_r-1)\,p_H\Big]$$
+$$\Delta \equiv \frac{\tilde\omega_{\text{sample-only}}-\omega_0}{\omega_0} = -\frac{1}{2}\Big[\overline{(\epsilon_r-1)}\,p_E + \overline{(\mu_r-1)}\,p_H\Big]$$
 
-Compute this as a single complex expression directly (complex $\epsilon_r,\mu_r,p_E,p_H$
-throughout) — do not attempt to hand-expand into separate real/imaginary sub-formulas before
-implementing; that expansion is exactly the kind of manual-algebra step that's introduced
-errors elsewhere in this project. Take $\mathrm{Re}$/$\mathrm{Im}$ only at the very last step
-(Section 2.3).
+**Corrected from an earlier draft**, which omitted the conjugate (bare
+$(\epsilon_r-1)p_E$, no overline). That form fails a basic physical requirement:
+for an ordinary low-loss dielectric sphere ($\epsilon_r=10-j0.1$, i.e. $\tan\delta_e=0.01$),
+direct evaluation gives $\mathrm{Im}(\Delta)>0$ — meaning a *lossy* sample would *improve*
+$Q$, which is unconditionally unphysical. The conjugated form gives $\mathrm{Im}(\Delta)<0$
+for the same input, as required. Verified this way (and independently, numerically, across a
+range of $\epsilon_r,\tan\delta$) rather than by re-deriving Harrington's formula from
+scratch for complex material — the reciprocity argument that extends a real-perturbation
+variational formula to complex (lossy) media is subtle enough that the passivity requirement,
+not the derivation, is the reliable arbiter here. `tests/test_perturbation.py`'s
+`test_passive_material_never_improves_q` and `test_reciprocal_q_additivity` are that arbiter
+in the actual codebase — treat them as authoritative over this formula's derivation.
+
+**Only the bare material contrast is conjugated** — $p_E,p_H$ (and the $\kappa_E,\kappa_H$
+inside them) are left exactly as Module 3 computes them, unconjugated. Compute this as a
+single complex expression directly (complex $\epsilon_r,\mu_r,p_E,p_H$ throughout) — do not
+attempt to hand-expand into separate real/imaginary sub-formulas before implementing; that
+expansion is exactly the kind of manual-algebra step that's introduced errors elsewhere in
+this project. Take $\mathrm{Re}$/$\mathrm{Im}$ only at the very last step (Section 2.3).
 
 ---
 
@@ -176,6 +190,17 @@ Per 0.3's fix, cache `{id(region): (region, I_E, I_H)}` inside `PerturbationMode
    trial material).
 3. Assemble $p_E,p_H$ (1.3), $\Delta$ (1.4), $\tilde\omega_{\text{loaded}}$ (2.1),
    $f_{\text{calc}},Q_{\text{calc}}$ (2.2), return a `PerturbationResult`.
+
+### 3.1 Retroactive public accessors needed by Module 5
+
+`PerturbationModel` must expose `field_provider` (the `FieldProvider` passed to `__init__`)
+and `Rs_walls` (the wall-loss argument, or `None`) as public read-only properties — not in
+this module's original interface sketch, but required by Module 5's closed-form seed
+(module5 doc §2.1–2.2), which needs $f_0,\epsilon_{bg},\mu_{bg},Q_{\text{wall}}$ and whether
+a wall-loss term is even present, bypassing `evaluate()`'s general (depolarization-corrected)
+path entirely. Any sibling forward-model class meant to be usable in `Measurement.model`
+(e.g. a future Ritz-based model) needs the same two accessors, not just a matching
+`evaluate(sample)` signature — Module 5's seed generation calls them directly.
 
 ---
 

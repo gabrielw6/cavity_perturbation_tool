@@ -25,6 +25,20 @@ class PerturbationResult:
     omega_tilde: complex  # rad/s, raw loaded eigenvalue
 
 
+def omega_tilde_to_result(omega_tilde: complex) -> PerturbationResult:
+    """f_calc, Q_calc extraction from a raw loaded complex eigenvalue
+    (module4 doc Section 2.2). Shared with `ritz.py`'s `RitzCorrectedModel`
+    (docs/ritz_module_plan.md Section 3.4), which produces `omega_tilde` via
+    a different (multi-mode Rayleigh-Ritz) route but needs identical
+    extraction logic -- reused rather than re-derived."""
+    f_calc = float(omega_tilde.real) / (2.0 * np.pi)
+    if omega_tilde.imag == 0.0:
+        Q_calc = float("inf")
+    else:
+        Q_calc = -omega_tilde.real / (2.0 * omega_tilde.imag)
+    return PerturbationResult(f_calc=f_calc, Q_calc=Q_calc, omega_tilde=omega_tilde)
+
+
 class PerturbationModel:
     """Forward model: given a Sample (region + material), predict the
     perturbed (f, Q) using a given FieldProvider for the unperturbed field."""
@@ -114,10 +128,4 @@ class PerturbationModel:
             wall_term = 0j  # Rs_walls is None <=> Q_wall -> infinity
         omega_tilde = omega0 * (1.0 + wall_term + delta)
 
-        f_calc = float(omega_tilde.real) / (2.0 * np.pi)
-        if omega_tilde.imag == 0.0:
-            Q_calc = float("inf")
-        else:
-            Q_calc = -omega_tilde.real / (2.0 * omega_tilde.imag)
-
-        return PerturbationResult(f_calc=f_calc, Q_calc=Q_calc, omega_tilde=omega_tilde)
+        return omega_tilde_to_result(omega_tilde)

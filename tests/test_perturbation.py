@@ -11,6 +11,8 @@ from cavity_perturbation.fields import AnalyticalField, FieldProvider
 from cavity_perturbation.perturbation import PerturbationModel, PerturbationResult
 from cavity_perturbation.sample import Material, Sample, Sphere
 
+from .conftest import assert_passive_material_never_improves_q
+
 
 class ConstantFieldProvider(FieldProvider):
     """Test double: spatially uniform E, H, with fixed f0/Q_wall/W/epsilon_bg/
@@ -102,19 +104,13 @@ def test_small_sample_limit_converges_to_point_dipole_formula():
 
 # --- Passivity => Q can only degrade ---------------------------------------
 
-@pytest.mark.parametrize("tan_delta_e", [0.0, 1e-3, 1e-2, 0.1])
-def test_passive_material_never_improves_q(tan_delta_e):
+def test_passive_material_never_improves_q():
     a = b = c = 0.03
     cav, field = _small_cavity_field()
     Rs = 0.02
     model = PerturbationModel(field, Rs_walls=Rs)
     region = Sphere(center=[a / 2, b / 2, c / 2], radius=1e-3)
-    material = Material.from_loss_tangent(4.5, tan_delta_e)
-    sample = Sample(region=region, material=material)
-
-    result = model.evaluate(sample)
-    Q_wall = cav.Q_wall(Rs)
-    assert result.Q_calc <= Q_wall * (1.0 + 1e-9)
+    assert_passive_material_never_improves_q(model, region, eps_r=4.5, Q_wall=cav.Q_wall(Rs))
 
 
 # --- Reciprocal-Q additivity -------------------------------------------------

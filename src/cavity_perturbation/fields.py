@@ -5,11 +5,17 @@ H. This module turns "E and H evaluated at a point" into "integral over V_s
 of |E|^2 dV and |H|^2 dV over an arbitrary sample region," a numerical-
 integration problem. See docs/module2_fields_equations.md for the full
 derivation and build order.
+
+The `RitzField(FieldProvider)` stub once sketched here has been retired --
+see docs/ritz_module_plan.md Section 0 for why a `FieldProvider`-shaped Ritz
+class was never the right interface for this project's sample-size-
+correction use case; `ritz.py`'s `RitzCorrectedModel` (a `PerturbationModel`
+sibling, not a `FieldProvider`) replaces it.
 """
 from __future__ import annotations
 
 from abc import ABC, abstractmethod
-from typing import Callable, Literal
+from typing import Callable, Literal, TypeVar
 
 import numpy as np
 
@@ -17,11 +23,13 @@ from .cavity import CavityMode
 from .sample import SampleRegion
 
 Array = np.ndarray
+_Number = TypeVar("_Number", float, complex)
 
 _CONVERGENCE_TOL = 1e-4
 _MAX_DOUBLINGS = 10
 _VOLUME_RTOL = 1e-4
 _IMAG_REL_TOL = 1e-9
+_CROSS_OVERLAP_ATOL_FACTOR = 1e-8  # fraction of the Cauchy-Schwarz bound treated as a noise floor
 
 
 def hermitian_density(field_values: Array) -> Array:
@@ -34,17 +42,26 @@ def hermitian_density(field_values: Array) -> Array:
 
 
 def converge_by_doubling(
-    estimator: Callable[[int], float],
+    estimator: Callable[[int], _Number],
     n_start: int,
     tol: float = _CONVERGENCE_TOL,
     max_doublings: int = _MAX_DOUBLINGS,
-) -> float:
+    atol: float = 0.0,
+) -> _Number:
     """Doubling convergence control (Section 1.5): evaluate `estimator` at n
-    and 2n, keep doubling until the relative change is within `tol`, up to
-    `max_doublings` doublings, then raise rather than silently return an
-    unconverged value. Returns the finer (most recent) estimate once
-    converged. `estimator` is independent of what's being integrated, so the
-    same helper drives both the E and H integrals without duplication.
+    and 2n, keep doubling until the change is within `tol` relative to the
+    current estimate (or within the absolute floor `atol`, whichever is
+    looser), up to `max_doublings` doublings, then raise rather than
+    silently return an unconverged value. Returns the finer (most recent)
+    estimate once converged. `estimator` is independent of what's being
+    integrated, so the same helper drives both the E and H integrals without
+    duplication -- generic over `float`/`complex` so
+    `integrate_field_cross_overlap` (generally complex-valued) can reuse it
+    too. `atol` defaults to 0 (pure relative tolerance, the original
+    behavior) -- it exists for callers like `integrate_field_cross_overlap`
+    whose true value can be exactly or near zero (e.g. two orthogonal
+    fields), where a relative-only tolerance never converges on
+    floating-point noise fluctuating around that zero.
     """
     n = n_start
     prev = estimator(n)
@@ -52,12 +69,12 @@ def converge_by_doubling(
         n *= 2
         curr = estimator(n)
         denom = curr if curr != 0.0 else prev
-        if denom == 0.0 or abs((curr - prev) / denom) <= tol:
+        if denom == 0.0 or abs(curr - prev) <= max(tol * abs(denom), atol):
             return curr
         prev = curr
     raise RuntimeError(
-        f"quadrature did not converge to rtol={tol} within {max_doublings} doublings "
-        f"(n up to {n})"
+        f"quadrature did not converge to rtol={tol} (atol={atol}) within {max_doublings} "
+        f"doublings (n up to {n})"
     )
 
 
@@ -189,36 +206,57 @@ class AnalyticalField(FieldProvider):
         return self._mode.Q_wall(Rs)
 
 
-class RitzField(FieldProvider):
-    """STUB for the sample-size-correction phase (Rayleigh-Ritz basis-function
-    expansion, Sec 7-6 procedure) -- deferred per CLAUDE.md. Fixing the
-    FieldProvider contract now so Modules 3-5 never need to change when this
-    lands; from the outside it will be indistinguishable from AnalyticalField.
+def integrate_field_cross_overlap(
+    region: SampleRegion,
+    field_i: Callable[[Array], Array],
+    field_j: Callable[[Array], Array],
+    n_points: int = 2000,
+) -> complex:
+    """integral over `region` of F_i . F_j* dV, for two independently
+    supplied vector field functions F_i, F_j (e.g. two different Module 1
+    modes' `.E`) -- the cross-overlap primitive needed by the Rayleigh-Ritz
+    module's mass-matrix assembly (docs/ritz_module_plan.md Section 2.4),
+    which `integrate_field_energy` doesn't cover (that method only handles
+    the same-field, same-index case |F|^2). A standalone function rather
+    than a `FieldProvider` method, since it operates on two fields, not one
+    provider's own E/H pair -- reuses the same quadrature/convergence
+    machinery as `integrate_field_energy` directly. Unlike a same-field
+    energy integral, this is generally complex (not manifestly real), so no
+    `_assert_real` step applies here.
+
+    Two fields can be (near-)exactly orthogonal over `region` -- e.g. two
+    distinct Module 1 modes, by symmetry, even over a small sub-volume (this
+    is *expected*, not a bug: see `RitzCorrectedModel`'s K matrix, Section
+    2.1, which relies on exactly this orthogonality over the *whole*
+    cavity). A relative-only tolerance never converges on floating-point
+    noise fluctuating around a true value of ~0, so this derives an
+    absolute floor from Cauchy-Schwarz (|<F_i,F_j>| <= sqrt(<F_i,F_i><F_j,F_j>))
+    up front, using the same quadrature resolution as the first estimate.
     """
+    volume_checked = False
 
-    def __init__(self, basis_functions: object, coefficients: Array) -> None:
-        raise NotImplementedError("RitzField is deferred to the sample-size-correction phase")
+    def estimate(n: int) -> complex:
+        nonlocal volume_checked
+        pts, w = region.quadrature_points(n)
+        if not volume_checked:
+            total_w = float(np.sum(w))
+            vol = region.volume()
+            if not np.isclose(total_w, vol, rtol=_VOLUME_RTOL):
+                raise ValueError(
+                    f"region.quadrature_points weights sum to {total_w!r}, "
+                    f"expected region.volume()={vol!r} (rtol={_VOLUME_RTOL}) -- "
+                    "quadrature_points is inconsistent with volume()"
+                )
+            volume_checked = True
+        vals_i = field_i(pts)
+        vals_j = field_j(pts)
+        overlap = np.sum(np.asarray(w) * np.sum(vals_i * np.conj(vals_j), axis=-1))
+        return complex(overlap)
 
-    def E(self, r: Array) -> Array:
-        raise NotImplementedError
+    pts0, w0 = region.quadrature_points(n_points)
+    w0 = np.asarray(w0)
+    scale_i = float(np.sum(w0 * np.sum(np.abs(field_i(pts0)) ** 2, axis=-1)))
+    scale_j = float(np.sum(w0 * np.sum(np.abs(field_j(pts0)) ** 2, axis=-1)))
+    atol = _CROSS_OVERLAP_ATOL_FACTOR * float(np.sqrt(max(scale_i, 0.0) * max(scale_j, 0.0)))
 
-    def H(self, r: Array) -> Array:
-        raise NotImplementedError
-
-    def total_stored_energy(self) -> float:
-        raise NotImplementedError
-
-    @property
-    def f0(self) -> float:
-        raise NotImplementedError
-
-    @property
-    def epsilon_bg(self) -> complex:
-        raise NotImplementedError
-
-    @property
-    def mu_bg(self) -> complex:
-        raise NotImplementedError
-
-    def Q_wall(self, Rs: float) -> float:
-        raise NotImplementedError
+    return converge_by_doubling(estimate, n_points, atol=atol)

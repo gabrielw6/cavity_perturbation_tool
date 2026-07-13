@@ -26,10 +26,16 @@ $\nabla_t$ be the gradient restricted to the transverse coordinates (Cartesian $
 rectangular cavity; polar $\rho,\phi$ for the circular and coaxial cavities).
 
 **$\mathrm{TM}_z$ family** ($H_z = 0$):
-$$E_z = \Phi, \qquad \mathbf{E}_t = \frac{1}{k_c^2}\nabla_t\!\left(\frac{\partial \Phi}{\partial z}\right), \qquad \mathbf{H}_t = \frac{j\omega\epsilon}{k_c^2}\,\hat z \times \nabla_t \Phi$$
+$$E_z = \Phi, \qquad \mathbf{E}_t = \frac{1}{k_c^2}\nabla_t\!\left(\frac{\partial \Phi}{\partial z}\right), \qquad \mathbf{H}_t = -\frac{j\omega\epsilon}{k_c^2}\,\hat z \times \nabla_t \Phi$$
 
 **$\mathrm{TE}_z$ family** ($E_z = 0$):
-$$H_z = \Phi, \qquad \mathbf{H}_t = \frac{1}{k_c^2}\nabla_t\!\left(\frac{\partial \Phi}{\partial z}\right), \qquad \mathbf{E}_t = -\frac{j\omega\mu}{k_c^2}\,\hat z \times \nabla_t \Phi$$
+$$H_z = \Phi, \qquad \mathbf{H}_t = \frac{1}{k_c^2}\nabla_t\!\left(\frac{\partial \Phi}{\partial z}\right), \qquad \mathbf{E}_t = \frac{j\omega\mu}{k_c^2}\,\hat z \times \nabla_t \Phi$$
+
+These signs (opposite to an earlier draft of this section) are the ones verified against
+$\nabla\times E=-j\omega\mu H$ by direct derivation and confirmed by the curl-residual
+regression test (`test_curl_residual`, `test_cyl_curl_residual`, `test_numerics.py`'s
+`test_tez_tmz_recipe_curl_residual_{tm,te}`) — trust this derivation and the passing tests
+over any other transcription of this recipe.
 
 This is exact — it falls directly out of Maxwell's equations for any source-free,
 homogeneous region and any coordinate system, so it applies unchanged to the rectangular and
@@ -119,7 +125,12 @@ $$E_x = \frac{j\omega\mu H_0}{k_c^2}\frac{n\pi}{b}\cos\!\frac{m\pi x}{a}\sin\!\f
 **$\mathrm{TM}_{mnp}$** ($H_z = 0$):
 $$E_z = E_0\sin\!\frac{m\pi x}{a}\sin\!\frac{n\pi y}{b}\cos\!\frac{p\pi z}{c}$$
 $$E_x = -\frac{E_0}{k_c^2}\frac{m\pi}{a}\frac{p\pi}{c}\cos\!\frac{m\pi x}{a}\sin\!\frac{n\pi y}{b}\sin\!\frac{p\pi z}{c}, \quad E_y = -\frac{E_0}{k_c^2}\frac{n\pi}{b}\frac{p\pi}{c}\sin\!\frac{m\pi x}{a}\cos\!\frac{n\pi y}{b}\sin\!\frac{p\pi z}{c}$$
-$$H_x = -\frac{j\omega\epsilon E_0}{k_c^2}\frac{n\pi}{b}\sin\!\frac{m\pi x}{a}\cos\!\frac{n\pi y}{b}\cos\!\frac{p\pi z}{c}, \quad H_y = \frac{j\omega\epsilon E_0}{k_c^2}\frac{m\pi}{a}\cos\!\frac{m\pi x}{a}\sin\!\frac{n\pi y}{b}\cos\!\frac{p\pi z}{c}$$
+$$H_x = \frac{j\omega\epsilon E_0}{k_c^2}\frac{n\pi}{b}\sin\!\frac{m\pi x}{a}\cos\!\frac{n\pi y}{b}\cos\!\frac{p\pi z}{c}, \quad H_y = -\frac{j\omega\epsilon E_0}{k_c^2}\frac{m\pi}{a}\cos\!\frac{m\pi x}{a}\sin\!\frac{n\pi y}{b}\cos\!\frac{p\pi z}{c}$$
+
+($H_x,H_y$ corrected the same way as the cylindrical $\mathrm{TM}_{npq}$ block above — an
+earlier draft had these two components swapped in sign, the same recipe-transcription error,
+just missed on the first pass through this section; verified symbolically against the
+corrected §0.1 recipe, not just re-asserted.)
 
 Sanity check built into the design: for $\mathrm{TE}_{011}$ ($m=0$), $E_y$ and $H_x$ collapse
 to zero identically (both have a bare $\sin(m\pi x/a)=\sin 0$ or a prefactor $m\pi/a=0$) —
@@ -231,7 +242,10 @@ $\hat z\times\hat\phi=-\hat\rho$):
 **$\mathrm{TM}_{npq}$** ($H_z=0$):
 $$E_z = J_n\!\left(\frac{X_{np}\rho}{a}\right)\cos(n\phi)\cos\!\left(\frac{q\pi z}{d}\right)$$
 $$E_\rho = -\frac{1}{k_c^2}\frac{q\pi}{d}\frac{X_{np}}{a}J_n'\!\left(\frac{X_{np}\rho}{a}\right)\cos(n\phi)\sin\!\left(\frac{q\pi z}{d}\right), \quad E_\phi = \frac{1}{k_c^2}\frac{q\pi}{d}\frac{n}{\rho}J_n\!\left(\frac{X_{np}\rho}{a}\right)\sin(n\phi)\sin\!\left(\frac{q\pi z}{d}\right)$$
-$$H_\rho = \frac{j\omega\epsilon}{k_c^2}\frac{n}{\rho}J_n\!\left(\frac{X_{np}\rho}{a}\right)\sin(n\phi)\cos\!\left(\frac{q\pi z}{d}\right), \quad H_\phi = \frac{j\omega\epsilon}{k_c^2}\frac{X_{np}}{a}J_n'\!\left(\frac{X_{np}\rho}{a}\right)\cos(n\phi)\cos\!\left(\frac{q\pi z}{d}\right)$$
+$$H_\rho = -\frac{j\omega\epsilon}{k_c^2}\frac{n}{\rho}J_n\!\left(\frac{X_{np}\rho}{a}\right)\sin(n\phi)\cos\!\left(\frac{q\pi z}{d}\right), \quad H_\phi = -\frac{j\omega\epsilon}{k_c^2}\frac{X_{np}}{a}J_n'\!\left(\frac{X_{np}\rho}{a}\right)\cos(n\phi)\cos\!\left(\frac{q\pi z}{d}\right)$$
+
+($H_\rho, H_\phi$ corrected to match §0.1's fixed $\mathrm{TM}_z$ sign — an earlier draft of
+this section had these with the opposite, un-fixed sign.)
 
 **$\mathrm{TE}_{npq}$** ($E_z=0$): identical structure with $J_n \to J_n$ (same function, zeros
 $X'_{np}$ instead), $\cos(q\pi z/d)\leftrightarrow\sin(q\pi z/d)$ roles swapped, $\omega\epsilon
@@ -347,9 +361,17 @@ a good cross-check that all three geometries are dimensionally consistent with e
 ### 3.4 Stored energy
 
 Using the master formula (0.2) directly:
-$$W = \frac{\epsilon}{2}\int_a^b\!\int_0^{2\pi}\!\int_0^L |E_\rho|^2\,\rho\,d\rho\,d\phi\,dz = \frac{\epsilon}{2}\cdot 2\pi\ln(b/a)\cdot V_m^2\int_0^L \sin^2\!\left(\frac{q\pi z}{L}\right)dz$$
-using $\int_a^b d\rho/\rho = \ln(b/a)$ and the trig identity (0.4) for the $z$-integral
-($=L/2$ since $q\ge1$). Closed form, no quadrature needed at all for this geometry.
+$$W = \frac{\epsilon}{2}\int_a^b\!\int_0^{2\pi}\!\int_0^L |E_\rho|^2\,\rho\,d\rho\,d\phi\,dz = \frac{\epsilon}{2}\cdot\frac{2\pi}{\ln(b/a)}\cdot V_m^2\int_0^L \sin^2\!\left(\frac{q\pi z}{L}\right)dz$$
+
+**Corrected from an earlier draft**, which stated this proportional to $\ln(b/a)$: since
+$E_\rho=V(z)/(\rho\ln(b/a))$, the radial integral is
+$\int_a^b\rho\cdot\frac{1}{\rho^2\ln^2(b/a)}\,d\rho=\frac{1}{\ln^2(b/a)}\int_a^b\frac{d\rho}{\rho}=\frac{\ln(b/a)}{\ln^2(b/a)}=\frac{1}{\ln(b/a)}$
+— one power of $\ln(b/a)$ short of what the earlier draft carried through. Physically, this
+sign of the dependence is the only one that makes sense: for fixed voltage amplitude $V_m$,
+stored energy must **diverge**, not vanish, as the two conductors merge ($b\to a$,
+$\ln(b/a)\to0$) — matching the standard coaxial capacitance-per-length result
+$C'=2\pi\epsilon/\ln(b/a)$, which diverges the same way. Verified against brute-force
+quadrature directly (not just this dimensional argument).
 
 ### 3.5 Wall-loss Q
 

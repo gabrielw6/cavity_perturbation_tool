@@ -133,24 +133,33 @@ using $\omega_0=2\pi f_0$ and $Q_{\text{wall}}$ from `model.field_provider` (or 
 
 ### 2.3 Single-measurement solve (`fit_mu=False`)
 
-With $\mu_r\equiv1$ fixed, Module 4 §1.4's formula reduces to one linear complex equation:
-$$\Delta_{\text{meas}} = -\frac12(\epsilon_r-1)\,p_E^{(0)} \quad\Longrightarrow\quad \epsilon_r^{(0)} = 1 - \frac{2\,\Delta_{\text{meas}}}{p_E^{(0)}}$$
-computed from the *first* measurement in `self._meas`. One complex division, no iteration —
-directly gives both $\epsilon_r'$ and $\epsilon_r''$ as the seed.
+With $\mu_r\equiv1$ fixed, Module 4 §1.4's formula (as actually implemented, with the
+conjugate correction — see that doc's §1.4) reduces to one linear complex equation:
+$$\Delta_{\text{meas}} = -\frac12\overline{(\epsilon_r-1)}\,p_E^{(0)} \quad\Longrightarrow\quad \epsilon_r^{(0)} = 1 - 2\,\overline{\left(\frac{\Delta_{\text{meas}}}{p_E^{(0)}}\right)}$$
+computed from the *first* measurement in `self._meas`. One complex division and a conjugate,
+no iteration — directly gives both $\epsilon_r'$ and $\epsilon_r''$ as the seed. (An earlier
+draft of this section inverted the *un*-conjugated formula; this seed must invert whatever
+`perturbation.py` actually computes, not the formula as first drafted — see Module 4 §1.4 for
+why the conjugate is there.)
 
 ### 2.4 Two-measurement solve (`fit_mu=True`)
 
 A single measurement cannot separate $\epsilon_r$ and $\mu_r$ (this is exactly the
 identifiability point from the original project discussion — one $(f,Q)$ pair is one complex
-equation in two complex unknowns). Using the first two measurements, form the linear system:
-$$\begin{pmatrix}\Delta_{\text{meas},1}\\ \Delta_{\text{meas},2}\end{pmatrix} = -\frac12\begin{pmatrix}p_E^{(0)}(1) & p_H^{(0)}(1)\\[2pt] p_E^{(0)}(2) & p_H^{(0)}(2)\end{pmatrix}\begin{pmatrix}\epsilon_r-1\\ \mu_r-1\end{pmatrix}$$
-and solve the $2\times2$ complex linear system directly (`numpy.linalg.solve`) for
-$(\epsilon_r-1,\mu_r-1)$. **This $2\times2$ matrix is a miniature version of the identifiability
-check from the original discussion**: if the two measurements have nearly the same
-$p_E^{(0)}:p_H^{(0)}$ ratio (same field character at both sample placements/modes), this
-matrix is ill-conditioned and the seed itself will be poor — a useful early warning, before
-the optimizer ever runs, that these two measurements don't actually constrain both unknowns
-well (see Section 4.2 for the same diagnostic applied to the full nonlinear fit).
+equation in two complex unknowns). Using the first two measurements, form the linear system
+for the conjugated unknowns:
+$$\begin{pmatrix}-2\Delta_{\text{meas},1}\\ -2\Delta_{\text{meas},2}\end{pmatrix} = \begin{pmatrix}p_E^{(0)}(1) & p_H^{(0)}(1)\\[2pt] p_E^{(0)}(2) & p_H^{(0)}(2)\end{pmatrix}\begin{pmatrix}\overline{\epsilon_r-1}\\ \overline{\mu_r-1}\end{pmatrix}$$
+solve the $2\times2$ complex linear system directly (`numpy.linalg.solve`) for
+$(\overline{\epsilon_r-1},\overline{\mu_r-1})$, then conjugate each component back to get
+$(\epsilon_r-1,\mu_r-1)$. **This $2\times2$ matrix is a miniature version of the
+identifiability check from the original discussion**: if the two measurements have nearly the
+same $p_E^{(0)}:p_H^{(0)}$ ratio (same field character at both sample placements/modes), this
+matrix is ill-conditioned (or, for exactly-degenerate ratios, exactly singular) and the seed
+itself will be poor — a useful early warning, before the optimizer ever runs, that these two
+measurements don't actually constrain both unknowns well (see Section 4.2 for the same
+diagnostic applied to the full nonlinear fit). A singular system should fall back to the same
+neutral prior as the underdetermined case (2.5), not let the exception propagate out of seed
+generation.
 
 ### 2.5 Fallback when underdetermined
 
@@ -180,6 +189,12 @@ that range.
 $$\hat p = \arg\min_p \sum_i r_i(p)^2 \quad\text{s.t. bounds (3.1)}$$
 via `least_squares(self._residuals, p0, bounds=bounds, method='trf', jac='2-point',
 x_scale='jac')`, with `p0` from Section 2.
+
+**Clip the seed into the bounds before calling `least_squares`**: `scipy.optimize.least_squares`
+requires $lb\le x_0\le ub$ exactly, but a data-derived closed-form seed (or a user-supplied
+initial guess) is not guaranteed to satisfy a fitting *prior* like $\epsilon'\ge1$ — clip
+`p0` to `(lo, hi)` immediately before the call, rather than let an otherwise-reasonable seed
+make the optimizer call infeasible.
 
 ---
 

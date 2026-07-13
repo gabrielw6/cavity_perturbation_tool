@@ -140,15 +140,32 @@ oblique angle, the internal field is a tensor operation on the external field, n
 multiple, and `depolarization_factor` cannot return a physically meaningful single number.
 Cavity perturbation samples are, in practice, deliberately oriented along a field extremum for
 exactly this reason (aligned or perpendicular placement, never oblique), so this isn't a
-significant scope restriction — but it must be checked, not assumed:
+significant scope restriction — but it must be checked, not assumed.
 
-$$\cos\theta = \frac{|\hat n \cdot \hat F|}{\lvert\hat n\rvert\,\lvert\hat F\rvert}, \qquad \hat n = \text{shape's axis (rod) or normal (slab)}, \quad \hat F = \texttt{field\_direction}$$
+**A step this section originally omitted**: `field_direction` (the local $E_0$ or $H_0$
+vector from Module 4) is generally *complex*, not real — every Cartesian component of a
+single Module 1 mode shares one overall complex phase (e.g. a $\mathrm{TE}$ mode's $E_x,E_y$
+both carry the same $j\omega\mu$ prefactor, so the field can be purely imaginary under a
+real-amplitude convention). Naively taking `.real` before the angle test would silently zero
+out a field that's legitimately real in its own spatial pattern, just rotated onto the
+imaginary axis by that shared phase. Extract the common phase first, using the component of
+largest magnitude as reference:
+$$\hat F = \frac{\mathrm{Re}\!\left[F\,e^{-j\arg(F_{k^*})}\right]}{\lVert\cdot\rVert}, \qquad k^*=\arg\max_k|F_k|$$
+and only then take
+$$\cos\theta = \frac{|\hat n \cdot \hat F|}{\lvert\hat n\rvert\,\lvert\hat F\rvert}, \qquad \hat n = \text{shape's axis (rod) or normal (slab)}$$
+
+**Degenerate case**: if `field_direction` is (numerically) zero — e.g. a sample sitting
+exactly on a $\mathrm{TM}_{010}$ cavity's axis, where $H_0$ vanishes identically by symmetry
+— there is no well-defined alignment. This is a legitimate degeneracy, not an error: treat it
+the same as the oblique case (fall through to the `'generic'` fallback, 2.4) rather than
+raising.
 
 With tolerance $\theta_{\text{tol}}=10°$ (named constant, not a magic number):
 - $\theta<\theta_{\text{tol}}$: axial/normal case, use the corresponding $N$ from 2.2.
 - $\theta>90°-\theta_{\text{tol}}$: transverse/tangential case, use the corresponding $N$.
-- otherwise: fall back to `shape_kind='generic'` behavior (2.4) and flag it — the sample is
-  misoriented relative to what the closed-form correction assumes.
+- otherwise (including the zero-field degeneracy above): fall back to `shape_kind='generic'`
+  behavior (2.4) and flag it — the sample is misoriented relative to what the closed-form
+  correction assumes.
 
 ### 2.4 `'generic'` fallback
 

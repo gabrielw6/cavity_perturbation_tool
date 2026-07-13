@@ -17,7 +17,7 @@ from cavity_perturbation.cavity import (
     ModeIndex,
     RectangularCavity,
 )
-from cavity_perturbation.fields import AnalyticalField, FieldProvider, RitzField
+from cavity_perturbation.fields import AnalyticalField, FieldProvider, integrate_field_cross_overlap
 from cavity_perturbation.sample import SampleRegion
 
 
@@ -259,15 +259,6 @@ def test_analytical_field_epsilon_bg_mu_bg_passthrough():
     assert field.mu_bg == mu
 
 
-def test_ritz_field_epsilon_bg_mu_bg_raise_not_implemented():
-    # __init__ always raises, so exercise the methods directly on the class
-    # (mirrors how test_ritz_field_stub_raises_not_implemented handles this).
-    with pytest.raises(NotImplementedError):
-        RitzField.epsilon_bg.fget(object.__new__(RitzField))
-    with pytest.raises(NotImplementedError):
-        RitzField.mu_bg.fget(object.__new__(RitzField))
-
-
 # --- Scale invariance (Section 1.4 / 8) ------------------------------------
 
 @pytest.mark.parametrize("field_name", ["E", "H"])
@@ -284,12 +275,32 @@ def test_scale_invariance_of_integrate_field_energy(field_name):
     assert I2 == pytest.approx(abs(2.0 - 1.5j) ** 2 * I1, rel=1e-6)
 
 
-# --- RitzField stub ---------------------------------------------------------
+# --- integrate_field_cross_overlap (docs/ritz_module_plan.md Section 2.4) --
 
-def test_ritz_field_stub_raises_not_implemented():
-    with pytest.raises(NotImplementedError):
-        RitzField(basis_functions=[], coefficients=np.array([]))
+def test_cross_overlap_degenerate_case_matches_integrate_field_energy():
+    """field_i is field_j should agree exactly with integrate_field_energy
+    (docs/ritz_module_plan.md Section 6, step 1) -- isolates a bug in the
+    new cross-overlap primitive from anything Ritz-specific."""
+    a, b, c = 0.03, 0.04, 0.05
+    cav = RectangularCavity(a, b, c, ModeIndex("TE", (0, 1, 1)))
+    field = AnalyticalField(cav)
+    region = BoxRegion(0, a, 0, b, 0, c)
+
+    overlap = integrate_field_cross_overlap(region, field.E, field.E)
+    energy = field.integrate_field_energy(region, "E")
+
+    assert overlap.imag == pytest.approx(0.0, abs=1e-9 * abs(overlap.real))
+    assert overlap.real == pytest.approx(energy, rel=1e-9)
 
 
-def test_ritz_field_is_field_provider_subclass():
-    assert issubclass(RitzField, FieldProvider)
+def test_cross_overlap_distinct_modes_is_conjugate_symmetric():
+    a, b, c = 0.03, 0.04, 0.05
+    cav1 = RectangularCavity(a, b, c, ModeIndex("TE", (0, 1, 1)))
+    cav2 = RectangularCavity(a, b, c, ModeIndex("TE", (1, 0, 1)))
+    field1, field2 = AnalyticalField(cav1), AnalyticalField(cav2)
+    region = BoxRegion(0, a, 0, b, 0, c)
+
+    overlap_ij = integrate_field_cross_overlap(region, field1.E, field2.E)
+    overlap_ji = integrate_field_cross_overlap(region, field2.E, field1.E)
+
+    assert overlap_ji == pytest.approx(np.conj(overlap_ij), rel=1e-6)
