@@ -22,6 +22,120 @@ def copper_Rs(f0: float) -> float:
     return np.sqrt(np.pi * f0 * constants.mu_0 / COPPER_CONDUCTIVITY)
 
 
+# --- Wall-loss Q_wall cross-check helpers: brute-force surface quadrature of
+# |H_tan|^2, independent of each cavity's own closed-form Q_wall (Section
+# 0.3/1.6/2.6/3.5) -- the surface-integral analogue of the existing
+# total_stored_energy brute-force volume checks below. |H_tan|^2 is computed
+# geometrically as |H|^2 - |H.n_hat|^2 (n_hat the face's unit normal), so the
+# same helper works for any planar or curved face without hand-picking which
+# H components are tangential per face, unlike the closed-form derivation.
+
+def _gauss_legendre_1d(lo: float, hi: float, n: int) -> tuple[np.ndarray, np.ndarray]:
+    xi, wi = np.polynomial.legendre.leggauss(max(n, 1))
+    x = 0.5 * (hi - lo) * xi + 0.5 * (hi + lo)
+    w = 0.5 * (hi - lo) * wi
+    return x, w
+
+
+def _tangential_h_sq(cav: CavityMode, pts: np.ndarray, normals: np.ndarray) -> np.ndarray:
+    H = cav.H(pts)
+    H_mag2 = np.sum(np.abs(H) ** 2, axis=-1)
+    H_dot_n = np.sum(H * normals, axis=-1)  # normals real -- fine against complex H
+    return H_mag2 - np.abs(H_dot_n) ** 2
+
+
+def _numerical_q_wall_rectangular(cav: RectangularCavity, Rs: float, n: int = 60) -> float:
+    a, b, c = cav.a, cav.b, cav.c
+    p_loss = 0.0
+
+    def face_loss(fixed_axis: int, fixed_value: float, extent1: float, extent2: float, normal: np.ndarray) -> float:
+        u, wu = _gauss_legendre_1d(0.0, extent1, n)
+        v, wv = _gauss_legendre_1d(0.0, extent2, n)
+        U, V = np.meshgrid(u, v, indexing="ij")
+        WU, WV = np.meshgrid(wu, wv, indexing="ij")
+        pts = np.zeros((U.size, 3))
+        other_axes = [ax for ax in range(3) if ax != fixed_axis]
+        pts[:, fixed_axis] = fixed_value
+        pts[:, other_axes[0]] = U.ravel()
+        pts[:, other_axes[1]] = V.ravel()
+        normals = np.tile(normal, (pts.shape[0], 1))
+        h_tan_sq = _tangential_h_sq(cav, pts, normals)
+        return float(np.sum(WU.ravel() * WV.ravel() * h_tan_sq))
+
+    p_loss += face_loss(0, 0.0, b, c, np.array([1.0, 0.0, 0.0]))  # x=0
+    p_loss += face_loss(0, a, b, c, np.array([1.0, 0.0, 0.0]))  # x=a
+    p_loss += face_loss(1, 0.0, a, c, np.array([0.0, 1.0, 0.0]))  # y=0
+    p_loss += face_loss(1, b, a, c, np.array([0.0, 1.0, 0.0]))  # y=b
+    p_loss += face_loss(2, 0.0, a, b, np.array([0.0, 0.0, 1.0]))  # z=0
+    p_loss += face_loss(2, c, a, b, np.array([0.0, 0.0, 1.0]))  # z=c
+
+    P_loss = Rs / 2.0 * p_loss
+    omega0 = 2.0 * np.pi * cav.f0
+    return omega0 * cav.total_stored_energy() / P_loss
+
+
+def _numerical_q_wall_cylindrical(cav: CylindricalCavity, Rs: float, n: int = 80) -> float:
+    a, d = cav.a, cav.d
+    p_loss = 0.0
+
+    # Curved wall, rho=a
+    phi, w_phi = _gauss_legendre_1d(0.0, 2.0 * np.pi, n)
+    z, w_z = _gauss_legendre_1d(0.0, d, n)
+    PHI, Z = np.meshgrid(phi, z, indexing="ij")
+    WPHI, WZ = np.meshgrid(w_phi, w_z, indexing="ij")
+    pts = np.stack([a * np.cos(PHI).ravel(), a * np.sin(PHI).ravel(), Z.ravel()], axis=-1)
+    normals = np.stack([np.cos(PHI).ravel(), np.sin(PHI).ravel(), np.zeros(PHI.size)], axis=-1)
+    p_loss += a * float(np.sum(WPHI.ravel() * WZ.ravel() * _tangential_h_sq(cav, pts, normals)))
+
+    # End caps, z=0 and z=d
+    rho, w_rho = _gauss_legendre_1d(0.0, a, n)
+    phi2, w_phi2 = _gauss_legendre_1d(0.0, 2.0 * np.pi, n)
+    RHO, PHI2 = np.meshgrid(rho, phi2, indexing="ij")
+    WRHO, WPHI2 = np.meshgrid(w_rho, w_phi2, indexing="ij")
+    x2, y2 = RHO.ravel() * np.cos(PHI2).ravel(), RHO.ravel() * np.sin(PHI2).ravel()
+    for z0 in (0.0, d):
+        pts2 = np.stack([x2, y2, np.full(x2.size, z0)], axis=-1)
+        normals2 = np.tile(np.array([0.0, 0.0, 1.0]), (pts2.shape[0], 1))
+        h_tan_sq2 = _tangential_h_sq(cav, pts2, normals2)
+        p_loss += float(np.sum(WRHO.ravel() * WPHI2.ravel() * RHO.ravel() * h_tan_sq2))
+
+    P_loss = Rs / 2.0 * p_loss
+    omega0 = 2.0 * np.pi * cav.f0
+    return omega0 * cav.total_stored_energy() / P_loss
+
+
+def _numerical_q_wall_coaxial(cav: CoaxialCavity, Rs: float, n: int = 80) -> float:
+    """Full surface (inner + outer curved walls, both end caps) -- unlike
+    `CoaxialCavity.Q_wall` itself (Section 3.5), which deliberately omits
+    the end-cap contribution as negligible for a long resonator."""
+    r_in, r_out, L = cav.a, cav.b, cav.L
+    p_loss = 0.0
+
+    phi, w_phi = _gauss_legendre_1d(0.0, 2.0 * np.pi, n)
+    z, w_z = _gauss_legendre_1d(0.0, L, n)
+    PHI, Z = np.meshgrid(phi, z, indexing="ij")
+    WPHI, WZ = np.meshgrid(w_phi, w_z, indexing="ij")
+    normals = np.stack([np.cos(PHI).ravel(), np.sin(PHI).ravel(), np.zeros(PHI.size)], axis=-1)
+    for radius in (r_in, r_out):
+        pts = np.stack([radius * np.cos(PHI).ravel(), radius * np.sin(PHI).ravel(), Z.ravel()], axis=-1)
+        p_loss += radius * float(np.sum(WPHI.ravel() * WZ.ravel() * _tangential_h_sq(cav, pts, normals)))
+
+    rho, w_rho = _gauss_legendre_1d(r_in, r_out, n)
+    phi2, w_phi2 = _gauss_legendre_1d(0.0, 2.0 * np.pi, n)
+    RHO, PHI2 = np.meshgrid(rho, phi2, indexing="ij")
+    WRHO, WPHI2 = np.meshgrid(w_rho, w_phi2, indexing="ij")
+    x2, y2 = RHO.ravel() * np.cos(PHI2).ravel(), RHO.ravel() * np.sin(PHI2).ravel()
+    for z0 in (0.0, L):
+        pts2 = np.stack([x2, y2, np.full(x2.size, z0)], axis=-1)
+        normals2 = np.tile(np.array([0.0, 0.0, 1.0]), (pts2.shape[0], 1))
+        h_tan_sq2 = _tangential_h_sq(cav, pts2, normals2)
+        p_loss += float(np.sum(WRHO.ravel() * WPHI2.ravel() * RHO.ravel() * h_tan_sq2))
+
+    P_loss = Rs / 2.0 * p_loss
+    omega0 = 2.0 * np.pi * cav.f0
+    return omega0 * cav.total_stored_energy() / P_loss
+
+
 # --- Basic construction / defaults -----------------------------------------
 
 def test_default_mode_is_te011():
@@ -169,6 +283,22 @@ def test_total_stored_energy_matches_brute_force_quadrature(kind, indices):
     assert cav.total_stored_energy() == pytest.approx(expected, rel=1e-6)
 
 
+# --- Wall-loss consistency: Q_wall vs. brute-force surface quadrature ------
+
+@pytest.mark.parametrize("kind,indices", [("TE", (0, 1, 1)), ("TM", (1, 1, 1)), ("TE", (1, 0, 2))])
+def test_q_wall_matches_numerical_surface_integral(kind, indices):
+    """Section 1.6's closed-form Q_wall is claimed to be exactly the master
+    formula (0.3) evaluated over all six wall faces -- cross-check it against
+    a brute-force |H_tan|^2 surface quadrature that doesn't share any code
+    with the closed form (no trig identities, no hand-picked tangential
+    components per face), the surface-integral analogue of the
+    total_stored_energy volume check above."""
+    a, b, c = 0.03, 0.04, 0.05
+    cav = RectangularCavity(a, b, c, ModeIndex(kind, indices))
+    Rs = copper_Rs(cav.f0)
+    assert cav.Q_wall(Rs) == pytest.approx(_numerical_q_wall_rectangular(cav, Rs), rel=1e-6)
+
+
 # --- contains / bounding_box ------------------------------------------------
 
 def test_contains_and_bounding_box():
@@ -296,6 +426,17 @@ def test_cyl_total_stored_energy_matches_brute_force_quadrature(kind, indices):
     assert cav.total_stored_energy() == pytest.approx(expected, rel=1e-5)
 
 
+@pytest.mark.parametrize("kind,indices", [("TM", (0, 1, 0)), ("TE", (1, 1, 1)), ("TM", (1, 1, 1))])
+def test_cyl_q_wall_matches_numerical_surface_integral(kind, indices):
+    """Section 2.6's closed-form Q_wall (curved wall + 2 end caps, via the
+    Bessel/trig identities) cross-checked against a brute-force |H_tan|^2
+    surface quadrature -- same rationale as the rectangular case above."""
+    a, d = 0.05, 0.09
+    cav = CylindricalCavity(a, d, ModeIndex(kind, indices))
+    Rs = copper_Rs(cav.f0)
+    assert cav.Q_wall(Rs) == pytest.approx(_numerical_q_wall_cylindrical(cav, Rs), rel=1e-5)
+
+
 def test_cyl_rho_axis_no_nan():
     """Section 2.8 step 3: quadrature points landing exactly on the axis
     must not produce NaN, for n=0, 1, or >=2."""
@@ -381,6 +522,48 @@ def test_coax_q_wall_positive_and_reasonable():
     Q = cav.Q_wall(Rs)
     assert Q > 0
     assert 1e2 < Q < 1e5
+
+
+def test_coax_q_wall_close_to_full_surface_integral_for_long_resonator():
+    """Unlike the rectangular/cylindrical cases, Section 3.5's closed-form
+    Q_wall is a deliberate *approximation*: it uses the transmission-line
+    attenuation-constant route (curved walls only) and explicitly omits the
+    end-cap contribution as negligible for a long resonator -- not a full
+    surface integral. So this should NOT match the full brute-force surface
+    quadrature (inner + outer walls + both end caps) exactly, only closely,
+    with the closed form's omitted (positive) loss term making it a slight
+    over-estimate of the true (full-surface) Q. Verified empirically: ~4.4%
+    high for L=0.5 m (L/b ~ 22, "long"), matching the documented
+    approximation, not a bug."""
+    a, b, L = 0.01, 0.023, 0.5
+    cav = CoaxialCavity(a, b, L)
+    Rs = copper_Rs(cav.f0)
+    Q_analytical = cav.Q_wall(Rs)
+    Q_full_surface = _numerical_q_wall_coaxial(cav, Rs)
+    assert Q_analytical > Q_full_surface  # omitted end-cap loss -> P_loss underestimated -> Q overestimated
+    assert Q_analytical == pytest.approx(Q_full_surface, rel=0.1)
+
+
+def test_coax_q_wall_endcap_gap_grows_for_short_resonator():
+    """The omitted end-cap loss is a *fixed* absolute contribution
+    (proportional to end-cap area), while the curved-wall loss the closed
+    form does account for shrinks with L -- so the same approximation should
+    visibly break down for a "short" resonator (L comparable to the
+    conductor radii), not just be uniformly small. This is the direct
+    demonstration that Section 3.5's approximation is scale-dependent, not a
+    universal few-percent constant."""
+    a, b = 0.01, 0.023
+    cav_long = CoaxialCavity(a, b, 0.5)
+    cav_short = CoaxialCavity(a, b, 0.05)
+
+    def relative_gap(cav: CoaxialCavity) -> float:
+        Rs = copper_Rs(cav.f0)
+        Q_analytical = cav.Q_wall(Rs)
+        Q_full_surface = _numerical_q_wall_coaxial(cav, Rs)
+        return (Q_analytical - Q_full_surface) / Q_full_surface
+
+    assert relative_gap(cav_short) > relative_gap(cav_long)
+    assert relative_gap(cav_long) < 0.1  # "long" case still stays small
 
 
 def test_coax_contains_and_bounding_box():

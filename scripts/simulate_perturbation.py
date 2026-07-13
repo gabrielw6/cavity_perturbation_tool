@@ -23,12 +23,19 @@ Usage:
 
 Add --plot to also draw the wall-only vs. loaded resonance (Lorentzian)
 curves (requires matplotlib, pip install -e ".[viz]").
+
+Add --compare-ritz to also predict (f, Q) via the Rayleigh-Ritz multi-mode
+model (docs/ritz_module_plan.md) and report its difference from Module 4's
+single-mode + depolarization-factor prediction -- growing disagreement as
+the sample grows is the "sample-size correction" effect that module exists
+to quantify. Only supports non-magnetic samples (--sample-mu-r 1, the
+default); with --plot, the Ritz curve is added to the figure too.
 """
 from __future__ import annotations
 
 import argparse
 import sys
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, Callable
 
 import numpy as np
 from scipy import constants
@@ -45,6 +52,7 @@ from cavity_perturbation.cavity import (
 )
 from cavity_perturbation.fields import AnalyticalField, FieldProvider
 from cavity_perturbation.perturbation import PerturbationModel, PerturbationResult
+from cavity_perturbation.ritz import RitzCorrectedModel, nearest_basis_modes
 from cavity_perturbation.sample import (
     Cylinder,
     Material,
@@ -66,20 +74,26 @@ def _rs_from_conductivity(f0: float, sigma: float) -> float:
 
 # --- Cavity construction (mirrors scripts/visualize_cavity.py) ------------
 
+def cavity_type_and_args(
+    args: argparse.Namespace,
+) -> tuple[Callable[..., CavityMode], tuple[float, ...], ModeIndex]:
+    """(constructor, positional geometry args, mode) -- shared by
+    build_cavity (one instance) and --compare-ritz's basis construction
+    (several instances of the same geometry, different modes)."""
+    if args.cavity == "rectangular":
+        return RectangularCavity, (args.a, args.b, args.c), ModeIndex(args.mode_kind, tuple(args.mode_indices))
+    if args.cavity == "cylindrical":
+        return CylindricalCavity, (args.radius, args.length), ModeIndex(args.mode_kind, tuple(args.mode_indices))
+    if args.cavity == "coaxial":
+        return CoaxialCavity, (args.r_inner, args.r_outer, args.length), ModeIndex("TEM", tuple(args.mode_indices))
+    raise ValueError(f"unknown cavity type {args.cavity!r}")
+
+
 def build_cavity(args: argparse.Namespace) -> CavityMode:
     eps = args.bg_eps_r * constants.epsilon_0
     mu = args.bg_mu_r * constants.mu_0
-
-    if args.cavity == "rectangular":
-        mode = ModeIndex(args.mode_kind, tuple(args.mode_indices))
-        return RectangularCavity(args.a, args.b, args.c, mode, eps=eps, mu=mu)
-    if args.cavity == "cylindrical":
-        mode = ModeIndex(args.mode_kind, tuple(args.mode_indices))
-        return CylindricalCavity(args.radius, args.length, mode, eps=eps, mu=mu)
-    if args.cavity == "coaxial":
-        mode = ModeIndex("TEM", tuple(args.mode_indices))
-        return CoaxialCavity(args.r_inner, args.r_outer, args.length, mode, eps=eps, mu=mu)
-    raise ValueError(f"unknown cavity type {args.cavity!r}")
+    cavity_type, cavity_args, mode = cavity_type_and_args(args)
+    return cavity_type(*cavity_args, mode, eps=eps, mu=mu)
 
 
 def resolve_rs(cav: CavityMode, args: argparse.Namespace) -> float:
@@ -247,7 +261,44 @@ def print_report(
         )
 
 
-def plot_resonance_curves(f0: float, Q_wall: float, combined: PerturbationResult, save: str | None) -> None:
+def print_ritz_comparison(
+    f0: float,
+    combined: PerturbationResult,
+    ritz_combined: PerturbationResult,
+    sample_only: PerturbationResult,
+    ritz_sample_only: PerturbationResult,
+    basis_size: int,
+) -> None:
+    """Compares Module 4's single-mode + depolarization-factor prediction
+    against the Rayleigh-Ritz multi-mode prediction for the *same* cavity
+    and sample. Growing disagreement as the sample grows relative to the
+    cavity is the "sample-size correction" effect docs/ritz_module_plan.md
+    Section 7.3 studies -- not evidence either individual answer is wrong."""
+    print("\n=== Rayleigh-Ritz comparison (docs/ritz_module_plan.md) ===")
+    print(f"basis size (N)       = {basis_size}")
+
+    df_calc = ritz_combined.f_calc - combined.f_calc
+    print(
+        f"f_calc (Ritz)        = {ritz_combined.f_calc:.6e} Hz   "
+        f"(Module 4: {combined.f_calc:.6e} Hz, diff = {df_calc:+.4e} Hz, rel = {df_calc / f0:+.4e})"
+    )
+    print(f"Q_calc (Ritz)        = {ritz_combined.Q_calc:.6e}   (Module 4: {combined.Q_calc:.6e})")
+
+    inv_q_module4 = 1.0 / sample_only.Q_calc
+    inv_q_ritz = 1.0 / ritz_sample_only.Q_calc
+    print(
+        f"1/Q_sample_only      = {inv_q_ritz:.4e} (Ritz)  vs  {inv_q_module4:.4e} (Module 4)   "
+        f"diff = {inv_q_ritz - inv_q_module4:+.4e}"
+    )
+
+
+def plot_resonance_curves(
+    f0: float,
+    Q_wall: float,
+    combined: PerturbationResult,
+    save: str | None,
+    ritz_combined: PerturbationResult | None = None,
+) -> None:
     """Q_wall=inf (no wall loss at all) or combined.Q_calc=inf (no loss
     anywhere in this configuration) are both genuine, not edge cases to
     paper over: a lossless resonator really does have infinite Q, and a
@@ -260,13 +311,15 @@ def plot_resonance_curves(f0: float, Q_wall: float, combined: PerturbationResult
         x = 2.0 * Q * (f - f_res) / f_res
         return 1.0 / (1.0 + x**2)
 
-    # Range must cover both peaks' widths *and* the shift between their
+    # Range must cover all peaks' widths *and* the shifts between their
     # centers -- sizing it from one linewidth alone (ignoring the frequency
-    # pull) can clip the other peak off-screen when the shift exceeds it.
-    finite_qs = [q for q in (Q_wall, combined.Q_calc) if np.isfinite(q)]
+    # pull) can clip another peak off-screen when the shift exceeds it.
+    results = (Q_wall, combined.Q_calc) + ((ritz_combined.Q_calc,) if ritz_combined is not None else ())
+    finite_qs = [q for q in results if np.isfinite(q)]
     width = 4.0 * f0 / min(finite_qs) if finite_qs else 1e-3 * f0
-    f_lo = min(f0, combined.f_calc) - width
-    f_hi = max(f0, combined.f_calc) + width
+    centers = (f0, combined.f_calc) + ((ritz_combined.f_calc,) if ritz_combined is not None else ())
+    f_lo = min(centers) - width
+    f_hi = max(centers) + width
     f = np.linspace(f_lo, f_hi, 2000)
 
     fig, ax = plt.subplots(figsize=(7, 4.5))
@@ -278,7 +331,9 @@ def plot_resonance_curves(f0: float, Q_wall: float, combined: PerturbationResult
             ax.axvline(f_res / 1e9, color=color, linestyle="--", label=f"{label} (Q=inf)")
 
     plot_one(f0, Q_wall, "original cavity, no sample", "tab:blue")
-    plot_one(combined.f_calc, combined.Q_calc, "loaded, with sample", "tab:orange")
+    plot_one(combined.f_calc, combined.Q_calc, "loaded, with sample (Module 4)", "tab:orange")
+    if ritz_combined is not None:
+        plot_one(ritz_combined.f_calc, ritz_combined.Q_calc, "loaded, with sample (Ritz)", "tab:green")
 
     ax.set_xlabel("frequency [GHz]")
     ax.set_ylabel("normalized response")
@@ -341,6 +396,15 @@ def build_parser() -> argparse.ArgumentParser:
     common.add_argument("--force", action="store_true",
                          help="proceed even if a large fraction of the sample lies outside the cavity's valid volume")
 
+    common.add_argument("--compare-ritz", action="store_true",
+                         help="also predict (f, Q) via the Rayleigh-Ritz multi-mode model and report the "
+                              "difference from Module 4 (non-magnetic samples only, --sample-mu-r 1)")
+    common.add_argument("--ritz-n-basis", type=int, default=5,
+                         help="Ritz basis size: the mode of interest plus this many minus one "
+                              "nearest-frequency modes (default: 5)")
+    common.add_argument("--ritz-max-index", type=int, default=4,
+                         help="max per-axis mode index searched when picking Ritz basis candidates (default: 4)")
+
     rect = subparsers.add_parser("rectangular", parents=[common])
     rect.add_argument("--a", type=float, required=True)
     rect.add_argument("--b", type=float, required=True)
@@ -401,6 +465,34 @@ def main(argv: list[str] | None = None) -> None:
 
         print_report(cav, region, material, Rs, combined, sample_only, kappa_E, kappa_H, outside_fraction)
 
+        ritz_combined = None
+        if args.compare_ritz:
+            # A local try/except: the primary Module 4 simulation above
+            # already succeeded and its report already printed -- an
+            # out-of-scope sample (mu_r != 1) for the optional Ritz
+            # comparison shouldn't discard that or exit(1), just skip the
+            # comparison with a clear reason.
+            try:
+                if abs(material.mu - 1.0) > 1e-9:
+                    raise ValueError(
+                        f"RitzCorrectedModel only supports non-magnetic samples (mu_r=1), "
+                        f"got mu_r={material.mu!r}"
+                    )
+                cavity_type, cavity_args, mode = cavity_type_and_args(args)
+                basis = nearest_basis_modes(
+                    cavity_type, cavity_args, mode,
+                    n_basis=args.ritz_n_basis, max_index=args.ritz_max_index,
+                    eps_bg=cav.epsilon_bg, mu_bg=cav.mu_bg,
+                )
+                ritz_model_combined = RitzCorrectedModel(basis, Rs_walls=Rs)
+                ritz_model_sample_only = RitzCorrectedModel(basis, Rs_walls=None)
+                ritz_combined = ritz_model_combined.evaluate(sample)
+                ritz_sample_only = ritz_model_sample_only.evaluate(sample)
+                print_ritz_comparison(cav.f0, combined, ritz_combined, sample_only, ritz_sample_only, len(basis))
+            except ValueError as exc:
+                print(f"\nwarning: --compare-ritz skipped: {exc}", file=sys.stderr)
+                ritz_combined = None
+
         if args.plot:
             # Respect --no-wall-loss for the reference curve too: with no
             # wall-loss mechanism modeled, the original cavity genuinely has
@@ -408,7 +500,7 @@ def main(argv: list[str] | None = None) -> None:
             # renders that honestly as a vertical line, not a fabricated
             # finite-width curve.
             Q_wall_for_plot = cav.Q_wall(Rs) if Rs is not None else float("inf")
-            plot_resonance_curves(cav.f0, Q_wall_for_plot, combined, args.save)
+            plot_resonance_curves(cav.f0, Q_wall_for_plot, combined, args.save, ritz_combined)
     except ValueError as exc:
         print(f"error: {exc}", file=sys.stderr)
         sys.exit(1)
