@@ -10,7 +10,7 @@ Usage:
     python scripts/simulate_perturbation.py rectangular --a 0.03 --b 0.03 --c 0.03 \\
         --mode-kind TE --mode-indices 0 1 1 \\
         --shape sphere --sample-radius 1e-3 \\
-        --sample-eps-r 4.5 --sample-tan-delta-e 0.01
+        --sample-eps-r 4.5 --sample-tan-delta-e 0.0
 
     python scripts/simulate_perturbation.py cylindrical --radius 0.02 --length 0.03 \\
         --mode-kind TM --mode-indices 0 1 0 \\
@@ -30,6 +30,30 @@ single-mode + depolarization-factor prediction -- growing disagreement as
 the sample grows is the "sample-size correction" effect that module exists
 to quantify. Only supports non-magnetic samples (--sample-mu-r 1, the
 default); with --plot, the Ritz curve is added to the figure too.
+
+Add --compare-fdtd to also predict (f, Q) via a full time-domain FDTD
+simulation (docs/fdtd_module_plan.md) -- an independent cross-check that
+shares no code path with Module 4 past CavityMode/FieldProvider/Sample.
+Only supports non-magnetic samples (--sample-mu-r 1, the default); with
+--plot, the FDTD curve is added to the figure too. Unlike --compare-ritz
+(a fast eigen-solve), this runs an actual leapfrog time-stepping simulation
+and can take anywhere from several seconds to a few minutes depending on
+--fdtd-cells-per-wavelength and the sample/cavity size -- the sample must
+be resolved by several grid cells for a meaningful comparison (see
+docs/fdtd_module_plan.md Section 7.5), so shrinking the sample without also
+raising --fdtd-cells-per-wavelength can silently degrade accuracy rather
+than just speeding things up.
+
+Add --no-sample to skip the sample entirely and compare methods against the
+*empty* cavity (all of --shape/--sample-* become optional and are ignored).
+Internally this still evaluates a vanishingly small, material-matched
+placeholder Sample (radius 1e-9 m, eps_r=mu_r=1) rather than calling a
+separate "no sample" code path -- Module 4/Ritz/FDTD's own `evaluate()`
+always takes a `Sample`, and this placeholder makes zero material contrast
+by construction, so Module 4/Ritz report f_calc=f0 and Q_calc=Q_wall
+*exactly*; FDTD's report is the closest a real time-domain simulation gets
+to that same identity (docs/fdtd_module_plan.md Section 7.4's own
+empty-cavity check uses the identical technique).
 """
 from __future__ import annotations
 
@@ -50,6 +74,8 @@ from cavity_perturbation.cavity import (
     ModeIndex,
     RectangularCavity,
 )
+from cavity_perturbation.fdtd import FDTDModel
+from cavity_perturbation.fdtd.extract import ExtractionError
 from cavity_perturbation.fields import AnalyticalField, FieldProvider
 from cavity_perturbation.perturbation import PerturbationModel, PerturbationResult
 from cavity_perturbation.ritz import RitzCorrectedModel, nearest_basis_modes
@@ -66,6 +92,7 @@ from cavity_perturbation.sample import (
 
 COPPER_CONDUCTIVITY = 5.8e7  # S/m
 _OUTSIDE_FRACTION_TOLERANCE = 0.01  # max fraction of a sample allowed outside the cavity's domain
+_PLACEHOLDER_RADIUS = 1e-9  # m -- --no-sample's vanishing, material-matched stand-in sample
 
 
 def _rs_from_conductivity(f0: float, sigma: float) -> float:
@@ -208,6 +235,23 @@ def build_sample_region(cav: CavityMode, field: FieldProvider, args: argparse.Na
     raise ValueError(f"unknown --shape {args.shape!r}")
 
 
+def build_placeholder_sample(cav: CavityMode, field: FieldProvider, args: argparse.Namespace) -> Sample:
+    """--no-sample's stand-in: a vanishing sphere (radius `_PLACEHOLDER_RADIUS`)
+    with eps_r=mu_r=1 (relative to vacuum -- Module 4's material-contrast
+    term is (eps_r-1)/(mu_r-1), Section 1.4, so this is an *exact* zero
+    regardless of the cavity's background fill or the placeholder's
+    position/size, not just an approximately-small perturbation). Reuses
+    `resolve_position` for a `contains()`-safe location (margin=0, since
+    `_sample_margin` returns 0 for any --shape other than sphere/rod/disk,
+    which --no-sample leaves unset) rather than a hardcoded point, so it
+    works for every cavity type including CoaxialCavity, whose bounding-box
+    center sits inside the excluded inner conductor."""
+    position = resolve_position(cav, field, args)
+    region = Sphere(center=position, radius=_PLACEHOLDER_RADIUS)
+    material = Material.from_loss_tangent(1.0, 0.0, 1.0, 0.0)
+    return Sample(region=region, material=material)
+
+
 # --- Reporting ---------------------------------------------------------------
 
 def _fmt_complex(z: complex) -> str:
@@ -225,6 +269,7 @@ def print_report(
     kappa_E: complex,
     kappa_H: complex,
     outside_fraction: float,
+    no_sample: bool = False,
 ) -> None:
     f0 = cav.f0
     Q_wall = cav.Q_wall(Rs) if Rs is not None else float("inf")
@@ -232,6 +277,14 @@ def print_report(
     print("=== Cavity (Module 1) ===")
     print(f"f0     = {f0:.6e} Hz  ({f0 / 1e9:.4f} GHz)")
     print(f"Q_wall = {Q_wall:.4e}" + (f"  (Rs = {Rs:.4e} Ohm)" if Rs is not None else "  (wall loss disabled)"))
+
+    if no_sample:
+        print("\n=== Sample ===")
+        print("(none -- --no-sample given; comparing methods against the empty cavity)")
+        print("\n=== Perturbation result (Module 4) ===")
+        print(f"f_calc              = {combined.f_calc:.6e} Hz   (should equal f0 exactly)")
+        print(f"Q_calc (loaded)     = {combined.Q_calc:.6e}   (should equal Q_wall exactly)")
+        return
 
     print("\n=== Sample (Module 3) ===")
     print(f"shape        = {region.__class__.__name__}  (shape_kind='{region.shape_kind}')")
@@ -292,12 +345,36 @@ def print_ritz_comparison(
     )
 
 
+def print_fdtd_comparison(
+    f0: float,
+    combined: PerturbationResult,
+    fdtd_combined: PerturbationResult,
+) -> None:
+    """Compares Module 4's closed-form prediction against FDTDModel's
+    independent time-domain simulation (docs/fdtd_module_plan.md) for the
+    same cavity and sample -- the two share no code path past
+    CavityMode/FieldProvider/Sample, so agreement here is a genuine
+    cross-validation, not a tautology. Unlike --compare-ritz, no separate
+    "sample-only" FDTD run is reported: each FDTDModel.evaluate() call is a
+    full simulation (seconds to minutes), not a cheap eigen-solve, so a
+    second run just to isolate the wall-loss contribution isn't worth
+    doubling the runtime for a CLI diagnostic."""
+    print("\n=== FDTD comparison (docs/fdtd_module_plan.md) ===")
+    df_calc = fdtd_combined.f_calc - combined.f_calc
+    print(
+        f"f_calc (FDTD)        = {fdtd_combined.f_calc:.6e} Hz   "
+        f"(Module 4: {combined.f_calc:.6e} Hz, diff = {df_calc:+.4e} Hz, rel = {df_calc / f0:+.4e})"
+    )
+    print(f"Q_calc (FDTD)        = {fdtd_combined.Q_calc:.6e}   (Module 4: {combined.Q_calc:.6e})")
+
+
 def plot_resonance_curves(
     f0: float,
     Q_wall: float,
     combined: PerturbationResult,
     save: str | None,
     ritz_combined: PerturbationResult | None = None,
+    fdtd_combined: PerturbationResult | None = None,
 ) -> None:
     """Q_wall=inf (no wall loss at all) or combined.Q_calc=inf (no loss
     anywhere in this configuration) are both genuine, not edge cases to
@@ -314,10 +391,18 @@ def plot_resonance_curves(
     # Range must cover all peaks' widths *and* the shifts between their
     # centers -- sizing it from one linewidth alone (ignoring the frequency
     # pull) can clip another peak off-screen when the shift exceeds it.
-    results = (Q_wall, combined.Q_calc) + ((ritz_combined.Q_calc,) if ritz_combined is not None else ())
+    results = (
+        (Q_wall, combined.Q_calc)
+        + ((ritz_combined.Q_calc,) if ritz_combined is not None else ())
+        + ((fdtd_combined.Q_calc,) if fdtd_combined is not None else ())
+    )
     finite_qs = [q for q in results if np.isfinite(q)]
     width = 4.0 * f0 / min(finite_qs) if finite_qs else 1e-3 * f0
-    centers = (f0, combined.f_calc) + ((ritz_combined.f_calc,) if ritz_combined is not None else ())
+    centers = (
+        (f0, combined.f_calc)
+        + ((ritz_combined.f_calc,) if ritz_combined is not None else ())
+        + ((fdtd_combined.f_calc,) if fdtd_combined is not None else ())
+    )
     f_lo = min(centers) - width
     f_hi = max(centers) + width
     f = np.linspace(f_lo, f_hi, 2000)
@@ -334,6 +419,8 @@ def plot_resonance_curves(
     plot_one(combined.f_calc, combined.Q_calc, "loaded, with sample (Module 4)", "tab:orange")
     if ritz_combined is not None:
         plot_one(ritz_combined.f_calc, ritz_combined.Q_calc, "loaded, with sample (Ritz)", "tab:green")
+    if fdtd_combined is not None:
+        plot_one(fdtd_combined.f_calc, fdtd_combined.Q_calc, "loaded, with sample (FDTD)", "tab:red")
 
     ax.set_xlabel("frequency [GHz]")
     ax.set_ylabel("normalized response")
@@ -368,8 +455,12 @@ def build_parser() -> argparse.ArgumentParser:
                            help="wall conductivity [S/m] used to derive Rs if --rs not given (default: copper)")
     common.add_argument("--no-wall-loss", action="store_true", help="ignore wall loss entirely (Q_wall -> infinity)")
 
-    common.add_argument("--shape", choices=["sphere", "rod", "disk"], required=True,
-                         help="standard sample shape (sphere / thin rod / thin disk)")
+    common.add_argument("--no-sample", action="store_true",
+                         help="skip the sample entirely and compare methods against the empty cavity "
+                              "(--shape and all --sample-* options become optional and are ignored)")
+    common.add_argument("--shape", choices=["sphere", "rod", "disk"], default=None,
+                         help="standard sample shape (sphere / thin rod / thin disk) -- "
+                              "required unless --no-sample is given")
     common.add_argument("--sample-radius", type=float, default=None, help="sphere or rod radius [m]")
     common.add_argument("--sample-length", type=float, default=None,
                          help="rod length [m] (default: 16x radius, comfortably 'thin_rod')")
@@ -405,6 +496,20 @@ def build_parser() -> argparse.ArgumentParser:
     common.add_argument("--ritz-max-index", type=int, default=4,
                          help="max per-axis mode index searched when picking Ritz basis candidates (default: 4)")
 
+    common.add_argument("--compare-fdtd", action="store_true",
+                         help="also predict (f, Q) via a full FDTD time-domain simulation and report the "
+                              "difference from Module 4 (non-magnetic samples only, --sample-mu-r 1; "
+                              "can take seconds to minutes)")
+    common.add_argument("--fdtd-cells-per-wavelength", type=float, default=20.0,
+                         help="grid resolution: cells per wavelength at f0 (default: 20). The sample "
+                              "itself must also span several cells -- raise this if --sample-radius/"
+                              "-extent/-thickness is small relative to the cavity")
+    common.add_argument("--fdtd-min-cells-per-axis", type=int, default=8,
+                         help="minimum grid cells along each axis regardless of wavelength (default: 8)")
+    common.add_argument("--fdtd-record-periods", type=float, default=10.0,
+                         help="ringdown record length, in multiples of a rough-Q-estimate decay time "
+                              "(default: 10) -- longer improves Q accuracy at the cost of runtime")
+
     rect = subparsers.add_parser("rectangular", parents=[common])
     rect.add_argument("--a", type=float, required=True)
     rect.add_argument("--b", type=float, required=True)
@@ -431,26 +536,33 @@ def main(argv: list[str] | None = None) -> None:
         cav = build_cavity(args)
         field = AnalyticalField(cav)
 
-        region = build_sample_region(cav, field, args)
-        material = Material.from_loss_tangent(
-            args.sample_eps_r, args.sample_tan_delta_e, args.sample_mu_r, args.sample_tan_delta_m
-        )
-        if not material.is_passive:
-            raise ValueError(
-                f"sample material is not passive (eps_r={material.eps}, mu_r={material.mu}) -- "
-                "check --sample-tan-delta-e/-m are >= 0"
+        if args.no_sample:
+            sample = build_placeholder_sample(cav, field, args)
+            region, material = sample.region, sample.material
+            outside_fraction = 0.0
+        else:
+            if args.shape is None:
+                raise ValueError("--shape is required unless --no-sample is given")
+            region = build_sample_region(cav, field, args)
+            material = Material.from_loss_tangent(
+                args.sample_eps_r, args.sample_tan_delta_e, args.sample_mu_r, args.sample_tan_delta_m
             )
-        sample = Sample(region=region, material=material)
+            if not material.is_passive:
+                raise ValueError(
+                    f"sample material is not passive (eps_r={material.eps}, mu_r={material.mu}) -- "
+                    "check --sample-tan-delta-e/-m are >= 0"
+                )
+            sample = Sample(region=region, material=material)
 
-        pts, _w = region.quadrature_points(200)
-        outside_fraction = 1.0 - float(np.mean(cav.contains(pts)))
-        if outside_fraction > _OUTSIDE_FRACTION_TOLERANCE and not args.force:
-            raise ValueError(
-                f"~{outside_fraction:.1%} of the sample lies outside the cavity's valid volume "
-                "(e.g. clipping into a conductor) -- the field there is extrapolated nonsense, "
-                "not physical. Shrink the sample, move --sample-position further from the "
-                "boundary, or pass --force to proceed anyway (e.g. for a deliberate boundary test)."
-            )
+            pts, _w = region.quadrature_points(200)
+            outside_fraction = 1.0 - float(np.mean(cav.contains(pts)))
+            if outside_fraction > _OUTSIDE_FRACTION_TOLERANCE and not args.force:
+                raise ValueError(
+                    f"~{outside_fraction:.1%} of the sample lies outside the cavity's valid volume "
+                    "(e.g. clipping into a conductor) -- the field there is extrapolated nonsense, "
+                    "not physical. Shrink the sample, move --sample-position further from the "
+                    "boundary, or pass --force to proceed anyway (e.g. for a deliberate boundary test)."
+                )
 
         Rs = None if args.no_wall_loss else resolve_rs(cav, args)
         model_combined = PerturbationModel(field, Rs_walls=Rs)
@@ -463,7 +575,10 @@ def main(argv: list[str] | None = None) -> None:
         kappa_E = sample.depolarization_factor("E", field.E(center))
         kappa_H = sample.depolarization_factor("H", field.H(center))
 
-        print_report(cav, region, material, Rs, combined, sample_only, kappa_E, kappa_H, outside_fraction)
+        print_report(
+            cav, region, material, Rs, combined, sample_only, kappa_E, kappa_H, outside_fraction,
+            no_sample=args.no_sample,
+        )
 
         ritz_combined = None
         if args.compare_ritz:
@@ -493,6 +608,31 @@ def main(argv: list[str] | None = None) -> None:
                 print(f"\nwarning: --compare-ritz skipped: {exc}", file=sys.stderr)
                 ritz_combined = None
 
+        fdtd_combined = None
+        if args.compare_fdtd:
+            # Same local try/except pattern as --compare-ritz above: an
+            # out-of-scope sample or a failed ringdown extraction shouldn't
+            # discard the already-printed Module 4 report.
+            try:
+                if abs(material.mu - 1.0) > 1e-9:
+                    raise ValueError(
+                        f"FDTDModel only supports non-magnetic samples (mu_r=1), "
+                        f"got mu_r={material.mu!r}"
+                    )
+                print("\nrunning FDTD simulation (this can take a while)...", file=sys.stderr)
+                fdtd_model = FDTDModel(
+                    cav,
+                    Rs_walls=Rs,
+                    cells_per_wavelength=args.fdtd_cells_per_wavelength,
+                    min_cells_per_axis=args.fdtd_min_cells_per_axis,
+                    record_periods=args.fdtd_record_periods,
+                )
+                fdtd_combined = fdtd_model.evaluate(sample)
+                print_fdtd_comparison(cav.f0, combined, fdtd_combined)
+            except (ValueError, ExtractionError) as exc:
+                print(f"\nwarning: --compare-fdtd skipped: {exc}", file=sys.stderr)
+                fdtd_combined = None
+
         if args.plot:
             # Respect --no-wall-loss for the reference curve too: with no
             # wall-loss mechanism modeled, the original cavity genuinely has
@@ -500,7 +640,9 @@ def main(argv: list[str] | None = None) -> None:
             # renders that honestly as a vertical line, not a fabricated
             # finite-width curve.
             Q_wall_for_plot = cav.Q_wall(Rs) if Rs is not None else float("inf")
-            plot_resonance_curves(cav.f0, Q_wall_for_plot, combined, args.save, ritz_combined)
+            plot_resonance_curves(
+                cav.f0, Q_wall_for_plot, combined, args.save, ritz_combined, fdtd_combined
+            )
     except ValueError as exc:
         print(f"error: {exc}", file=sys.stderr)
         sys.exit(1)
