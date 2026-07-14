@@ -5,8 +5,12 @@ Standard Yee leapfrog: H updates from curl(E) (Section 5.1), advance a half
 step, E updates from curl(H) with the conductivity term (materials.py's
 Ca/Cb coefficients), advance a half step. Cells outside a component's own
 `cavity_interior` mask (grid/rasterize.py) are held at zero after every
-update -- Section 5.3's PEC enforcement, applied uniformly to every field
-component, not only E.
+update -- Section 5.3's PEC enforcement. E components additionally pin
+`tangential_wall_pin` cells to zero (the near-wall half of PEC enforcement
+`cavity_interior` alone can't catch, since `contains()`'s inclusive bounds
+mark a wall-coincident point as interior -- see
+`grid/rasterize.py::_tangential_wall_pin`); H updates only ever use
+`cavity_interior`, since PEC forces tangential E to zero, never H.
 """
 from __future__ import annotations
 
@@ -104,6 +108,7 @@ class FDTDStepper:
             if e_source is not None and component in e_source:
                 updated = updated + e_source[component]
             updated[~self.masks[component].cavity_interior] = 0.0
+            updated[self.masks[component].tangential_wall_pin] = 0.0
             self.E[component] = updated
 
         self.time += self.dt

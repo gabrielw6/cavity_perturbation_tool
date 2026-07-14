@@ -24,7 +24,19 @@ def test_empty_cavity_f0_converges_as_grid_refines():
     # Rectangular: no staircasing (the grid's own outer boundary IS the PEC
     # wall), so the remaining error is standard Yee-grid numerical
     # dispersion, which shrinks with resolution.
-    cav = RectangularCavity(0.03, 0.02, 0.025, ModeIndex("TE", (0, 1, 1)))
+    #
+    # Decisive regression test for the near-wall tangential-E PEC pin
+    # (grid/rasterize.py's tangential_wall_pin, stepper.py's use of it):
+    # without it, CavityMode.contains()'s inclusive bounds let a
+    # wall-coincident tangential-E point evolve freely instead of staying
+    # pinned at zero, driving f_calc ~10% high and giving a spuriously
+    # finite Q_calc (no wall/sample loss configured here, so a genuinely
+    # correct run has no decay mechanism at all -- the residual finite
+    # Q_calc below is entirely a finite-record extraction-noise floor, per
+    # 6.3's own documented limitation, not the wall-pin bug). Verified
+    # directly: this test's error bounds are well below what the buggy
+    # version produced at either resolution (~4.2% and ~0.63%).
+    cav = RectangularCavity(0.03, 0.04, 0.05, ModeIndex("TE", (0, 1, 1)))
 
     coarse = FDTDModel(cav, cells_per_wavelength=6, min_cells_per_axis=6)
     fine = FDTDModel(cav, cells_per_wavelength=16, min_cells_per_axis=6)
@@ -35,8 +47,8 @@ def test_empty_cavity_f0_converges_as_grid_refines():
     err_coarse = abs(f_coarse - cav.f0) / cav.f0
     err_fine = abs(f_fine - cav.f0) / cav.f0
 
-    assert err_coarse < 0.10
-    assert err_fine < 0.02
+    assert err_coarse < 0.01
+    assert err_fine < 0.005
     assert err_fine < err_coarse
 
 

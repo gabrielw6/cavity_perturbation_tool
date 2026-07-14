@@ -33,7 +33,15 @@ def test_matched_conductivity_rejects_nonpositive_eps_real():
 
 def _uniform_masks(grid: YeeGrid, sample_interior: np.ndarray) -> dict[str, ComponentMask]:
     cavity_interior = np.ones(grid.shape, dtype=bool)
-    return {c: ComponentMask(cavity_interior=cavity_interior, sample_interior=sample_interior) for c in E_COMPONENTS}
+    tangential_wall_pin = np.zeros(grid.shape, dtype=bool)
+    return {
+        c: ComponentMask(
+            cavity_interior=cavity_interior,
+            sample_interior=sample_interior,
+            tangential_wall_pin=tangential_wall_pin,
+        )
+        for c in E_COMPONENTS
+    }
 
 
 def test_no_sample_gives_lossless_background_coefficients_everywhere():

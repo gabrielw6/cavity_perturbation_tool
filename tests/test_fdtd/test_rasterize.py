@@ -7,7 +7,7 @@ import pytest
 
 from cavity_perturbation.cavity import CylindricalCavity, ModeIndex, RectangularCavity
 from cavity_perturbation.fdtd.grid.rasterize import rasterize_all, rasterize_component
-from cavity_perturbation.fdtd.grid.yee import COMPONENT_OFFSETS, YeeGrid
+from cavity_perturbation.fdtd.grid.yee import COMPONENT_OFFSETS, E_COMPONENTS, H_COMPONENTS, YeeGrid
 from cavity_perturbation.sample import Sphere
 
 
@@ -89,3 +89,50 @@ def test_cavity_interior_mask_matches_direct_contains_call():
     coords = grid.component_coords("Ez")
     expected = np.asarray(cav.contains(coords)).reshape(grid.shape)
     assert np.array_equal(mask.cavity_interior, expected)
+
+
+# --- tangential_wall_pin (near-wall PEC enforcement, Section 5.3) ---------
+
+# axis index (0=x, 1=y, 2=z) each E component is tangential to (its
+# COMPONENT_OFFSETS entry is 0.0 there) -- Ex is tangential to y and z
+# walls, never to x walls (where it's the *normal*, not tangential, field).
+_TANGENTIAL_AXES = {"Ex": (1, 2), "Ey": (0, 2), "Ez": (0, 1)}
+
+
+def _grid_matching_bounding_box(cav, n_per_axis=6):
+    rmin, rmax = cav.bounding_box()
+    cell_size = tuple((rmax - rmin) / n_per_axis)
+    return YeeGrid(shape=(n_per_axis, n_per_axis, n_per_axis), cell_size=cell_size, origin=rmin)
+
+
+@pytest.mark.parametrize("component", E_COMPONENTS)
+def test_tangential_wall_pin_true_only_on_index_0_slice_of_tangential_axes(component):
+    # A grid sized to exactly match the cavity's own bounding box (as
+    # fdtd/model.py's _build_grid does) -- CavityMode.contains()'s inclusive
+    # bounds mean a tangential E component's index-0 point along an axis it
+    # doesn't offset into sits exactly ON that wall (e.g. Ex's y=0, z=0
+    # points), which cavity_interior alone can't distinguish from a
+    # genuinely interior point.
+    cav = RectangularCavity(0.03, 0.02, 0.025, ModeIndex("TE", (0, 1, 1)))
+    grid = _grid_matching_bounding_box(cav)
+    mask = rasterize_component(grid, component, cavity_mode=cav, sample_region=None)
+
+    expected = np.zeros(grid.shape, dtype=bool)
+    for axis in _TANGENTIAL_AXES[component]:
+        idx = [slice(None)] * 3
+        idx[axis] = 0
+        expected[tuple(idx)] = True
+
+    # `expected` is built from exactly the two tangential axes -- an exact
+    # match here also confirms the non-tangential axis (the one this
+    # component IS offset into, where it's the *normal* not tangential
+    # field, and PEC doesn't constrain it) never contributes a pin.
+    assert np.array_equal(mask.tangential_wall_pin, expected)
+
+
+@pytest.mark.parametrize("component", H_COMPONENTS)
+def test_tangential_wall_pin_always_false_for_h_components(component):
+    cav = RectangularCavity(0.03, 0.02, 0.025, ModeIndex("TE", (0, 1, 1)))
+    grid = _grid_matching_bounding_box(cav)
+    mask = rasterize_component(grid, component, cavity_mode=cav, sample_region=None)
+    assert not np.any(mask.tangential_wall_pin)

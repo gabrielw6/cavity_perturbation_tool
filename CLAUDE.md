@@ -90,9 +90,17 @@ each doc:
   period count instead. (4) The small-sample cross-check against Module 4 (§7.5) needs the
   sample *itself* resolved by several grid cells — independent of how finely
   `cells_per_wavelength` resolves the cavity mode — or rasterization error dominates (a
-  1.5mm-radius sample at a ~3mm cell size gave ~196% Q error from this alone). See
-  `docs/fdtd_module_plan.md`'s own inline corrections (§6.1, §6.3, §7.4, §7.5) for the full
-  detail.
+  1.5mm-radius sample at a ~3mm cell size gave ~196% Q error from this alone). (5) §5.3's PEC
+  enforcement ("tangential $E$ forced to zero ... outside the cavity-interior mask") missed the
+  *near* (index-0) wall: `CavityMode.contains()`'s inclusive bounds report a wall-coincident
+  point as `cavity_interior=True`, so `updated[~cavity_interior]=0` never touched it, and
+  `stepper.py`'s curl(H)$\to E$ update drove it with a real neighboring $H$ value instead of
+  pinning it at zero — a ~4–10% high $f_r$ and a spuriously finite $Q$ on an otherwise
+  loss-free empty cavity, not shrinking under grid refinement (unlike ordinary numerical
+  dispersion) until fixed. Fixed with a second, `E`-only mask,
+  `ComponentMask.tangential_wall_pin`, applied in `stepper.py` right after
+  `cavity_interior`'s own zero-pin. See `docs/fdtd_module_plan.md`'s own inline corrections
+  (§5.3, §6.1, §6.3, §7.4, §7.5) for the full detail.
 
 ## Tech stack
 

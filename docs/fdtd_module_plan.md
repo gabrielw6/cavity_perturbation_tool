@@ -109,7 +109,10 @@ For each of the six field-component grids, build the material coefficient arrays
 equations (Section 5) need, by evaluating membership at that component's staggered location:
 
 - **Cavity interior mask**: `cavity_mode.contains(component_coords)` → which update cells are
-  inside the cavity at all (cells outside are held at the PEC boundary, Section 5.3).
+  inside the cavity at all (cells outside are held at the PEC boundary, Section 5.3). For $E$
+  components, a second mask, `tangential_wall_pin`, separately catches the near (index-0) wall
+  case `contains()`'s inclusive bounds let `cavity_interior` alone miss — see Section 5.3's
+  correction for why this needed to be a distinct mask, not folded into `cavity_interior`.
 - **Sample mask**: `sample.region.contains(component_coords)` → which cells get the sample's
   $\epsilon_r',\sigma$ versus the background $\epsilon_{bg},\sigma=0$.
 
@@ -208,6 +211,38 @@ PEC cavity walls: tangential $E$ forced to zero on all faces outside the cavity-
 (Section 2). For an axis-aligned rectangular cavity this is exact; for a staircased curved
 cavity it is the staircase approximation, whose error is quantified by the Section 6.4
 convergence study.
+
+**Implementation correction — the near (index-0) wall needed a second, separate mask.**
+"Outside the cavity-interior mask" only catches the *far* side of each axis correctly, because
+`CavityMode.contains()` uses inclusive bounds ($0\le x\le a$): a tangential-$E$ grid point that
+sits exactly *on* the near wall (e.g. $x=0$) reports `cavity_interior=True`, not `False` —
+`updated[~cavity_interior] = 0.0` never touches it. Left unpinned, that point is driven by a
+real neighboring $H$ value in `stepper.py`'s `_backward_diff` (curl(H)$\to E$ update) like any
+ordinary interior point, and evolves freely instead of staying at zero as PEC requires for a
+*tangential* component. This is a different failure mode from the far wall, which
+`_forward_diff`'s own zero-padding already handles correctly (the far wall is a *fictitious*
+point one index past the array, never a real stored grid point for this grid layout, since
+`shape[ax]` cells span $[0, a)$ under the zero-offset stagger, never reaching $a$ itself).
+
+Verified directly: uncorrected, this produced a ~4-10% high resonant frequency and a
+spuriously finite $Q$ in an otherwise loss-free (no wall, no sample loss) empty-cavity run —
+where the only physically correct answer is $f_r=f_0$ exactly and $Q\to\infty$ (bounded only by
+finite-record extraction noise, Section 6.3). The error did not shrink under grid refinement
+before the fix (a smoking gun that it wasn't ordinary numerical dispersion, which does shrink)
+and does shrink after it.
+
+Fixed via a second boolean mask, `ComponentMask.tangential_wall_pin` (`grid/rasterize.py`),
+computed only for $E$ components (always all-`False` for $H$ — PEC forces tangential $E$ to
+zero, never $H$): for each axis this component doesn't offset into (an integer, zero-valued
+`COMPONENT_OFFSETS` entry there — i.e. every axis it's tangential to), a point is pinned if it
+is itself `contains()==True` but a point half a cell further in the $-$axis direction is
+`contains()==False`. `stepper.py` applies `updated[tangential_wall_pin] = 0.0` right after the
+existing `updated[~cavity_interior] = 0.0`, every E-update, every step. This only pins wall
+points reachable by stepping half a cell along a single Cartesian axis — correct for every flat
+wall this project's cavity types have along at least one axis (rectangular; cylindrical/coaxial
+end-caps), but a curved radial wall (e.g. a cylindrical cavity's $\rho=a$ side) is not
+axis-aligned and would need a more general surface-normal neighbor check — noted as a `TODO`
+in `grid/rasterize.py`, out of scope for this fix.
 
 ---
 
