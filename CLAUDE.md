@@ -1,8 +1,10 @@
 # Cavity Perturbation Measurement Software
 
 Design-support tool for a thesis chapter on measuring ε, μ, and loss tangent via the
-cavity perturbation method. Sibling chapters (not in this repo) cover MoM, FEM, and FDTD
-for other measurement problems.
+cavity perturbation method. Sibling chapters (not in this repo) cover MoM and FEM for
+other measurement problems. FDTD (`fdtd/`) lives in this repo, as an independent
+time-domain cross-validation method for this same cavity-perturbation problem, not a
+separate measurement problem.
 
 ## Status
 
@@ -10,7 +12,8 @@ Modules 1–5 are implemented (`cavity.py`, `fields.py`, `sample.py`, `perturbat
 `inverse.py`) and pass their own doc's validation suite plus the end-to-end synthetic-recovery
 test (`tests/test_integration.py`). The Rayleigh–Ritz sample-size-correction module
 (`ritz.py`, per `docs/ritz_module_plan.md`) is also implemented and passes its own Section 7
-test plan (`tests/test_ritz.py`).
+test plan (`tests/test_ritz.py`). The FDTD module (`fdtd/`, per `docs/fdtd_module_plan.md`)
+is also implemented and passes its own Section 7 test plan (`tests/test_fdtd/`).
 
 Full specs live in `docs/`. **Read the relevant doc before touching code in that area — several
 diverge from their own original draft prose**, corrected during implementation or during a
@@ -64,6 +67,32 @@ each doc:
   this doesn't undermine the module's correctness (both are Ritz-vs-*a-different-approximation*
   comparison issues, not violations of a physical invariant — every physical-invariant check,
   passivity/Q-degradation, lossless-Hermitian, scale-invariance, N=1-exact-reduction, passes).
+- `docs/fdtd_module_plan.md` — `fdtd/`. Independent time-domain (Yee-grid leapfrog + ringdown
+  extraction) cross-check of Modules 1–4, not built on any of their machinery except
+  `contains()` (Section 0.3) and `FieldProvider`/`Material` as read-only inputs. Corrected in
+  place, found actually implementing/exercising it (not from the original design prose):
+  (1) §6.1's suggested full-length Hann window *overestimated* Q by 30–40% on a known-Q
+  synthetic ringdown, because a ringdown is already a physically decaying transient (unlike
+  the steady-state signal Hann is meant for) — a full raised-cosine taper reshapes the decay
+  itself rather than just smoothing the record boundary; fixed with a mild `('tukey', 0.2)`
+  taper. The independent time-domain (Hilbert-envelope) extraction route has no such tension
+  and recovered the same synthetic case to a few parts in $10^{-6}$. (2) §6.3's rough-Q guess
+  for sizing the record length — "Module 1's `Q_wall` or a coarse pre-run" — needed both
+  halves fixed: `Q_wall` alone misses a separately lossy sample entirely, and the sample-only
+  fallback originally used ($1/\tan\delta$, reasoned as "conservative") is actually *not*
+  conservative — for a small filling factor the true $Q$ can be tens of times $1/\tan\delta$,
+  so the record ended tens of times too early (caught directly: ~97% low $Q$ on a small
+  low-loss sample). Fixed by reusing `PerturbationModel` itself as the "coarse pre-run,"
+  cheap and already filling-factor-aware. (3) A genuinely loss-free run (no wall loss, no
+  sample loss) has unbounded true $Q$, so "several $\tau$" has no finite target — an
+  intermediate fallback expressing this as an assumed large $Q$ produced multi-million-step
+  runs at GHz frequencies; fixed by expressing the fallback directly as a fixed oscillation-
+  period count instead. (4) The small-sample cross-check against Module 4 (§7.5) needs the
+  sample *itself* resolved by several grid cells — independent of how finely
+  `cells_per_wavelength` resolves the cavity mode — or rasterization error dominates (a
+  1.5mm-radius sample at a ~3mm cell size gave ~196% Q error from this alone). See
+  `docs/fdtd_module_plan.md`'s own inline corrections (§6.1, §6.3, §7.4, §7.5) for the full
+  detail.
 
 ## Tech stack
 
@@ -88,7 +117,16 @@ src/cavity_perturbation/
     perturbation.py   # PerturbationModel, PerturbationResult, omega_tilde_to_result
     inverse.py        # InverseSolver, Measurement, FitResult
     ritz.py           # RitzCorrectedModel, nearest_basis_modes, converged_ritz_model
+    fdtd/             # FDTDModel: PerturbationModel-shaped sibling, time-domain cross-check
+        grid/         # yee.py (staggering), rasterize.py (contains()-based material masks)
+        stability.py  # CFL dt computation + enforcement
+        extract.py    # scipy.fft/scipy.signal ringdown -> (f_r, Q)
+        materials.py  # single-frequency conductivity match, E-update coefficient arrays
+        source.py     # mode-shaped soft-source excitation, probe placement
+        stepper.py    # leapfrog E/H update loop
+        model.py      # FDTDModel itself, orchestrates the above
 tests/                # one test file per module above, mirrored 1:1, + shared conftest.py
+                       # (tests/test_fdtd/ mirrors fdtd/ the same way)
 docs/                 # architecture + equations references, see Status above
 ```
 
@@ -177,6 +215,20 @@ Cross-module items worth not losing track of:
   isolates a matrix-assembly/conjugate bug from an eigensolve or mode-tracking bug, the same
   role the small-sample-limit test plays for Module 4 — cheaper to debug than the full
   multi-mode comparison, run it first after touching `RitzCorrectedModel`.
+- `fdtd/extract.py`'s synthetic-signal tests (`tests/test_fdtd/test_extract.py`, §7.3) are
+  built and pass *before* any Maxwell time step exists, same rationale as `ritz.py`'s N=1
+  test: isolate the signal-processing from the physics so a bug in one doesn't masquerade as
+  a bug in the other.
+- `fdtd/test_small_sample.py` (§7.5) needs the sample resolved by several grid cells, a
+  *different* resolution requirement from `cells_per_wavelength` (which only governs the
+  cavity-mode wavelength) — an under-resolved sample dominates the error long before the
+  cavity-mode resolution does; don't shrink the test sample below a few cells across when
+  tuning this test's runtime.
+- `fdtd/model.py`'s record-length sizing (`_record_duration`) directly reuses
+  `PerturbationModel` as its own rough-Q pre-estimate — if `PerturbationModel`'s formula ever
+  regresses (e.g. the Module 4 $\Delta$-conjugate bug recurring), `FDTDModel` runs would
+  silently mis-size their record length too, a coupling worth remembering when debugging
+  either module.
 
 ## Explicitly out of scope for this repo (deferred / elsewhere)
 
@@ -192,4 +244,12 @@ Cross-module items worth not losing track of:
   cavities.
 - Sensitivity maps, broader validation studies beyond the Ritz sample-size-correction sweep
   (`docs/ritz_module_plan.md` §7.3) — not yet designed.
-- MoM, FEM, FDTD — separate thesis chapters, separate repos.
+- Full dispersive (Debye/Lorentz) material modeling in `fdtd/materials.py` — the single-
+  frequency-matched conductivity (`docs/fdtd_module_plan.md` §4.3) is a deliberate first-pass
+  scope boundary, not an oversight.
+- Sub-cell/conformal boundary correction for `fdtd/`'s staircased curved-cavity boundaries,
+  and PML/adaptive grid-sizing-from-sample-extent (`docs/fdtd_module_plan.md` §7.5's note) —
+  documented future refinements, not first-pass requirements.
+- A general irregular-geometry FDTD grid — `fdtd/` only ever rasterizes onto a regular
+  Cartesian grid via `contains()` (Section 0.3), the same canonical-cavity-only scope as Ritz.
+- MoM, FEM — separate thesis chapters, separate repos.
