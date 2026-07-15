@@ -13,7 +13,9 @@ Modules 1–5 are implemented (`cavity.py`, `fields.py`, `sample.py`, `perturbat
 test (`tests/test_integration.py`). The Rayleigh–Ritz sample-size-correction module
 (`ritz.py`, per `docs/ritz_module_plan.md`) is also implemented and passes its own Section 7
 test plan (`tests/test_ritz.py`). The FDTD module (`fdtd/`, per `docs/fdtd_module_plan.md`)
-is also implemented and passes its own Section 7 test plan (`tests/test_fdtd/`).
+is also implemented and passes its own Section 7 test plan (`tests/test_fdtd/`). The GUI
+(`cavity_perturbation_gui`, a separate package, per `docs/gui_module_plan.md`) is also
+implemented and passes its own Section 8 test plan (`tests/test_gui/`).
 
 Full specs live in `docs/`. **Read the relevant doc before touching code in that area — several
 diverge from their own original draft prose**, corrected during implementation or during a
@@ -101,18 +103,34 @@ each doc:
   `ComponentMask.tangential_wall_pin`, applied in `stepper.py` right after
   `cavity_interior`'s own zero-pin. See `docs/fdtd_module_plan.md`'s own inline corrections
   (§5.3, §6.1, §6.3, §7.4, §7.5) for the full detail.
+- `docs/gui_module_plan.md` — `cavity_perturbation_gui` (a separate top-level package under
+  `src/`, not a submodule of `cavity_perturbation`). No physics of its own (Section 0.1) —
+  `adapters/` translates sidebar parameters into calls against the four solver classes plus
+  `InverseSolver`, and translates results back into plots; `cavity_perturbation` itself gained
+  only additive, backward-compatible extensions (Section 2): `evaluate_with_diagnostics` on
+  `FDTDModel`/`RitzCorrectedModel`, two new optional fields on `RingdownResult`, and a
+  `PerturbationModelLike` `Protocol` widening `Measurement.model`'s type. Corrected in place:
+  §9's dependency list named `PySide2`, which has no installable distribution at all for this
+  project's Python version (verified directly: `pip index versions PySide2` finds nothing,
+  since PySide2/Qt5 is EOL upstream) — substituted with `PySide6`, which `pyqtgraph` supports
+  transparently through its own Qt-binding shim, so nothing else about the plan's architecture
+  changed. See `docs/gui_module_plan.md`'s own inline correction (§9) for the full detail.
 
 ## Tech stack
 
 Python 3.11+, NumPy, SciPy (`special`, `optimize`, `integrate`), pytest. No other
 dependencies without a good reason — this is numerically-precise scientific code, not a
-web app; prefer closed-form/vectorized NumPy over adding a library.
+web app; prefer closed-form/vectorized NumPy over adding a library. Exception: the `gui`
+extra (`PySide6`, `pyqtgraph`, `PyOpenGL`, `pytest-qt`) backs the separate
+`cavity_perturbation_gui` package, which never leaks into `cavity_perturbation`'s own core
+`dependencies` list.
 
 ## Commands
 
 - Test: `pytest`
 - Test one module: `pytest tests/test_cavity.py -v`
 - Type check: `mypy src/`
+- Launch the GUI: `python -m cavity_perturbation_gui` (needs `pip install -e ".[gui]"` first)
 
 ## Repo layout
 
@@ -133,8 +151,21 @@ src/cavity_perturbation/
         source.py     # mode-shaped soft-source excitation, probe placement
         stepper.py    # leapfrog E/H update loop
         model.py      # FDTDModel itself, orchestrates the above
+src/cavity_perturbation_gui/  # separate package (docs/gui_module_plan.md); imports
+                       # cavity_perturbation, never the reverse (tests/test_gui/test_no_reverse_import.py)
+    adapters/         # no Qt import -- cavity/sample param dataclasses, one runner per tab,
+                       #   field_sampling.py (plane -> E/H, incl. Ritz reconstruction),
+                       #   geometry_description.py (CavityMode/SampleRegion -> plain primitives)
+    workers/          # solve_worker.py: QObject + moveToThread around one runner call
+    widgets/          # PySide6 + PyQtGraph: main_window, sidebar, geometry_view3d (GLViewWidget),
+                       #   curve_plot, field_plane_view, log_panel, tabs/ (one file per solver +
+                       #   inversion + geometry_tab.py, a dedicated live-updating 3D view added
+                       #   post-plan on user request)
+    logging_bridge.py # Python logging -> Qt log bar, captures warnings.warn too
+    app.py            # entry point (`python -m cavity_perturbation_gui`)
 tests/                # one test file per module above, mirrored 1:1, + shared conftest.py
-                       # (tests/test_fdtd/ mirrors fdtd/ the same way)
+                       # (tests/test_fdtd/ mirrors fdtd/ the same way; tests/test_gui/ mirrors
+                       #  cavity_perturbation_gui/ the same way, pytest-qt for the widgets/ half)
 docs/                 # architecture + equations references, see Status above
 ```
 
@@ -237,6 +268,15 @@ Cross-module items worth not losing track of:
   regresses (e.g. the Module 4 $\Delta$-conjugate bug recurring), `FDTDModel` runs would
   silently mis-size their record length too, a coupling worth remembering when debugging
   either module.
+- `cavity_perturbation_gui`'s `adapters/` layer is tested with plain pytest and real
+  `cavity_perturbation` calls (no mocking, no Qt) — it's the actual physics boundary, so a
+  mock there would hide the exact translation bugs this layer exists to get right.
+  `widgets/` tests, by contrast, mock the runner functions (Section 8) — a widget test's job
+  is confirming button-click-to-adapter-call wiring and exception-to-log-bar surfacing, not
+  re-verifying physics `adapters/`'s own tests already cover.
+- `tests/test_gui/test_no_reverse_import.py` is a mechanical grep guard, not a convention —
+  run it after touching anything in `cavity_perturbation_gui/adapters/`, since that's the only
+  place a stray import in the wrong direction could plausibly creep in.
 
 ## Explicitly out of scope for this repo (deferred / elsewhere)
 
@@ -260,4 +300,9 @@ Cross-module items worth not losing track of:
   documented future refinements, not first-pass requirements.
 - A general irregular-geometry FDTD grid — `fdtd/` only ever rasterizes onto a regular
   Cartesian grid via `contains()` (Section 0.3), the same canonical-cavity-only scope as Ritz.
+- Mid-run cancellation for `cavity_perturbation_gui`'s solve workers, and a scrubbable
+  multi-snapshot FDTD field history in the GUI (only one end-of-excitation snapshot is kept,
+  `docs/gui_module_plan.md` Section 0.3/11) — both documented v1 scope boundaries, not gaps.
+- Result export (CSV/plot image saving) from the GUI — natural follow-on, not part of
+  `docs/gui_module_plan.md`'s plan.
 - MoM, FEM — separate thesis chapters, separate repos.

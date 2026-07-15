@@ -15,7 +15,7 @@ from typing import Sequence
 import numpy as np
 from scipy.optimize import least_squares
 
-from .perturbation import PerturbationModel
+from .perturbation import PerturbationModelLike
 from .sample import Material, Sample, SampleRegion
 
 Array = np.ndarray
@@ -30,7 +30,7 @@ _NEUTRAL_SEED_MU = 1.0 - 0j
 
 @dataclass(frozen=True)
 class Measurement:
-    model: PerturbationModel  # bound to the mode/geometry this reading came from
+    model: PerturbationModelLike  # bound to the mode/geometry this reading came from
     region: SampleRegion  # sample position/shape at time of this reading
     f_meas: float  # Hz
     Q_meas: float
@@ -56,7 +56,7 @@ class FitResult:
     raw: object  # scipy OptimizeResult, kept for diagnostics
 
 
-def point_dipole_filling_factors(model: PerturbationModel, region: SampleRegion) -> tuple[complex, complex]:
+def point_dipole_filling_factors(model: PerturbationModelLike, region: SampleRegion) -> tuple[complex, complex]:
     """p_E^(0), p_H^(0) (Section 2.1) -- the material-independent piece of
     Module 4's filling factors in the point-dipole limit (kappa_E=kappa_H=1,
     Module 3's 'generic' fallback). Standalone function of (model, region)
@@ -70,7 +70,7 @@ def point_dipole_filling_factors(model: PerturbationModel, region: SampleRegion)
     return p_E, p_H
 
 
-def _delta_from_measurement(model: PerturbationModel, f_meas: float, Q_meas: float) -> complex:
+def _delta_from_measurement(model: PerturbationModelLike, f_meas: float, Q_meas: float) -> complex:
     """Invert Module 4's combination formula (Section 2.2) for Delta given
     the measured complex resonance."""
     fp = model.field_provider

@@ -8,9 +8,9 @@ from scipy.linalg import eig, eigh
 
 from cavity_perturbation.cavity import ModeIndex, RectangularCavity
 from cavity_perturbation.fields import AnalyticalField
-from cavity_perturbation.inverse import point_dipole_filling_factors
+from cavity_perturbation.inverse import InverseSolver, Measurement, point_dipole_filling_factors
 from cavity_perturbation.perturbation import PerturbationModel
-from cavity_perturbation.ritz import RitzCorrectedModel, converged_ritz_model, nearest_basis_modes
+from cavity_perturbation.ritz import RitzCorrectedModel, RitzDiagnostics, converged_ritz_model, nearest_basis_modes
 from cavity_perturbation.sample import Cylinder, Material, Sample, Sphere
 
 from .conftest import assert_passive_material_never_improves_q
@@ -293,3 +293,43 @@ def test_construction_rejects_mismatched_background():
     cav2 = RectangularCavity(A, B, C, mode2, eps=2.0 * cav1.eps)
     with pytest.raises(ValueError):
         RitzCorrectedModel([cav1, cav2])
+
+
+# --- evaluate_with_diagnostics (docs/gui_module_plan.md Section 2.3) --------
+
+def test_evaluate_with_diagnostics_matches_evaluate():
+    basis, rmodel = _basis_and_model(n_basis=4)
+    sample = _off_axis_sample(radius=5e-4)
+
+    result = rmodel.evaluate(sample)
+    result_with_diag, diagnostics = rmodel.evaluate_with_diagnostics(sample)
+
+    assert result_with_diag == result
+    assert isinstance(diagnostics, RitzDiagnostics)
+    assert diagnostics.basis_modes == basis
+    assert diagnostics.coefficients.shape == (len(basis),)
+    assert np.iscomplexobj(diagnostics.coefficients)
+
+
+def test_evaluate_with_diagnostics_coefficients_are_mode_of_interest_dominant():
+    # A small, well-behaved sample shouldn't induce strong mixing -- the
+    # mode-of-interest (basis index 0) should carry most of the weight,
+    # consistent with evaluate()'s own k_star/weight selection.
+    basis, rmodel = _basis_and_model(n_basis=4)
+    sample = _off_axis_sample(radius=2e-4)
+    _, diagnostics = rmodel.evaluate_with_diagnostics(sample)
+    assert np.abs(diagnostics.coefficients[0]) == max(np.abs(diagnostics.coefficients))
+
+
+# --- Measurement/InverseSolver accept a RitzCorrectedModel (Section 2.4) ---
+
+def test_measurement_accepts_ritz_model_and_inverse_solver_runs():
+    _, rmodel = _basis_and_model(n_basis=4, Rs_walls=0.02)
+    region = Sphere(center=[A / 2, 0.8 * B / 2, 1.3 * C / 2], radius=5e-4)
+    material = Material.from_loss_tangent(4.5, 0.01)
+    sample = Sample(region=region, material=material)
+    result = rmodel.evaluate(sample)
+
+    measurement = Measurement(model=rmodel, region=region, f_meas=result.f_calc, Q_meas=result.Q_calc)
+    fit = InverseSolver([measurement]).fit()
+    assert fit.eps.real > 0.0

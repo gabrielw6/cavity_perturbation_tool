@@ -12,6 +12,17 @@ dependencies = ["numpy", "scipy"]
 # Only needed by scripts/visualize_cavity.py -- kept out of the core
 # dependencies since cavity_perturbation itself never plots anything.
 viz = ["matplotlib"]
+# cavity_perturbation_gui (docs/gui_module_plan.md) -- PySide6, not the
+# doc's originally-specified PySide2: PySide2 (Qt5, EOL) has no wheels for
+# this project's Python version at all, verified directly (pip has no
+# matching distribution). pyqtgraph supports both PySide2 and PySide6
+# transparently through its own Qt-binding shim, so this substitution
+# doesn't touch anything about the rest of the plan's architecture -- only
+# the specific binding library named. PyOpenGL backs pyqtgraph.opengl's
+# GLViewWidget (Section 0.2's 3D geometry view). pytest-qt is dev-only
+# (widget tests), not part of the app's own runtime dependency set, but
+# listed here since there's no separate dev-dependencies group yet.
+gui = ["PySide6", "pyqtgraph", "PyOpenGL", "pytest-qt"]
 
 [tool.setuptools.packages.find]
 where = ["src"]
@@ -28,3 +39,11 @@ strict = true
 # numpy's stubs return `Any` from most elementwise ops, so warn_return_any is
 # pure noise on vectorized numeric code -- every other strict check stays on.
 warn_return_any = false
+
+[[tool.mypy.overrides]]
+# pyqtgraph (and its opengl submodule) ships no type stubs or py.typed
+# marker -- same untyped-third-party treatment as gmsh/meshio got for the
+# (retired) meshing module. PySide6 itself ships its own stubs and needs no
+# override.
+module = ["pyqtgraph", "pyqtgraph.*"]
+ignore_missing_imports = true

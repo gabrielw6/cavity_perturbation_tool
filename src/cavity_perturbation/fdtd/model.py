@@ -15,9 +15,10 @@ from ..cavity import CavityMode
 from ..fields import FieldProvider, AnalyticalField
 from ..perturbation import PerturbationModel, PerturbationResult, omega_tilde_to_result
 from ..sample import Sample
+from .diagnostics import FDTDDiagnostics
 from .extract import extract_fft
 from .grid.rasterize import rasterize_all
-from .grid.yee import E_COMPONENTS, YeeGrid
+from .grid.yee import E_COMPONENTS, H_COMPONENTS, YeeGrid
 from .materials import assemble_e_coefficients
 from .source import build_modal_source, choose_probe_point, gaussian_modulated_pulse, gaussian_pulse_sigma_t
 from .stability import stable_time_step
@@ -146,6 +147,25 @@ class FDTDModel:
         """Predict (f_calc, Q_calc) for `sample`. Raises ValueError if
         `sample.material` isn't passive (CLAUDE.md passivity guard, same
         boundary `PerturbationModel.evaluate` checks)."""
+        result, _ = self._run(sample, capture=False)
+        return result
+
+    def evaluate_with_diagnostics(self, sample: Sample) -> tuple[PerturbationResult, FDTDDiagnostics]:
+        """Same physics and same result as `evaluate` -- additionally
+        returns the excitation waveform, ringdown spectrum, and a single
+        end-of-excitation field snapshot for the GUI's plots
+        (docs/gui_module_plan.md Section 2.1). `evaluate()` itself is
+        untouched and stays exactly as cheap as before; this only adds
+        bookkeeping when explicitly asked for."""
+        result, diagnostics = self._run(sample, capture=True)
+        assert diagnostics is not None  # capture=True always returns one
+        return result, diagnostics
+
+    def _run(self, sample: Sample, capture: bool) -> tuple[PerturbationResult, FDTDDiagnostics | None]:
+        """Shared runner behind `evaluate`/`evaluate_with_diagnostics`
+        (docs/gui_module_plan.md Section 2.1) -- one code path, `capture`
+        only controls whether the (small, already-computed-anyway) extra
+        bookkeeping is retained."""
         if not sample.material.is_passive:
             raise ValueError(
                 f"material {sample.material!r} is not passive "
@@ -169,12 +189,27 @@ class FDTDModel:
         t0 = self._n_pulse_sigma * sigma_t
         n_pulse_steps = int(math.ceil(2.0 * t0 / dt))
 
+        excitation_times = np.empty(n_pulse_steps) if capture else None
+        excitation_waveform = np.empty(n_pulse_steps) if capture else None
+
         t = 0.0
-        for _ in range(n_pulse_steps):
+        for n in range(n_pulse_steps):
             pulse_val = float(gaussian_modulated_pulse(np.array([t]), f0, t0, sigma_t)[0])
+            if capture:
+                assert excitation_times is not None and excitation_waveform is not None
+                excitation_times[n] = t
+                excitation_waveform[n] = pulse_val
             source = {c: pulse_val * self._source_profile[c] for c in E_COMPONENTS}
             stepper.step(e_source=source)
             t += dt
+
+        # 0.3's "end of excitation" choice -- the natural place, since it's
+        # exactly where the code already transitions from "inject" to
+        # "record" below.
+        field_snapshot = None
+        if capture:
+            field_snapshot = {c: stepper.E[c].copy() for c in E_COMPONENTS}
+            field_snapshot.update({c: stepper.H[c].copy() for c in H_COMPONENTS})
 
         duration = self._record_duration(sample, f0)
         n_record_steps = max(int(math.ceil(duration / dt)), 16)
@@ -197,4 +232,20 @@ class FDTDModel:
             Q_loaded = Q_fdtd
 
         omega_tilde = 2.0 * np.pi * f_r_fdtd * (1.0 - 1j / (2.0 * Q_loaded))
-        return omega_tilde_to_result(omega_tilde)
+        result = omega_tilde_to_result(omega_tilde)
+
+        if not capture:
+            return result, None
+
+        assert excitation_times is not None and excitation_waveform is not None and field_snapshot is not None
+        diagnostics = FDTDDiagnostics(
+            excitation_times=excitation_times,
+            excitation_waveform=excitation_waveform,
+            probe_times=times,
+            probe_series=probe_series,
+            spectrum_freqs=ringdown.spectrum_freqs,
+            spectrum_power=ringdown.spectrum_power,
+            field_snapshot=field_snapshot,
+            snapshot_grid=grid,
+        )
+        return result, diagnostics

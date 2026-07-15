@@ -9,6 +9,7 @@ cavity, per docs/module4_perturbation_equations.md. Depends only on
 from __future__ import annotations
 
 from dataclasses import dataclass
+from typing import Protocol
 
 import numpy as np
 
@@ -23,6 +24,27 @@ class PerturbationResult:
     f_calc: float  # Hz
     Q_calc: float  # unitless (inf if no loss at all, incl. wall)
     omega_tilde: complex  # rad/s, raw loaded eigenvalue
+
+
+class PerturbationModelLike(Protocol):
+    """Structural shape every forward model in this project shares
+    (docs/gui_module_plan.md Section 2.4): `PerturbationModel`,
+    `ritz.RitzCorrectedModel`, and `fdtd.FDTDModel` are already structurally
+    identical here, and `InverseSolver` already works with any of them at
+    runtime via duck typing -- this Protocol is only so `mypy --strict`
+    accepts that too (a bare `PerturbationModel` type annotation on
+    `Measurement.model` would otherwise reject a Ritz- or FDTD-backed
+    measurement). Deliberately narrow: only what `InverseSolver` and its
+    closed-form seed actually call, not `evaluate_with_diagnostics` or any
+    solver-specific extra."""
+
+    def evaluate(self, sample: Sample) -> PerturbationResult: ...
+
+    @property
+    def field_provider(self) -> FieldProvider: ...
+
+    @property
+    def Rs_walls(self) -> float | None: ...
 
 
 def omega_tilde_to_result(omega_tilde: complex) -> PerturbationResult:

@@ -73,3 +73,26 @@ def test_growing_signal_rejected_by_envelope_route():
     signal = np.exp(t / 2e-7) * np.cos(2.0 * np.pi * 1e9 * t)  # growing, unphysical for a passive ringdown
     with pytest.raises(ExtractionError):
         extract_envelope(t, signal)
+
+
+# --- RingdownResult.spectrum_freqs/spectrum_power (docs/gui_module_plan.md
+# Section 2.2) -------------------------------------------------------------
+
+def test_fft_route_populates_spectrum_fields():
+    t, signal, _ = _synthetic_ringdown(1e9, 500.0)
+    result = extract_fft(t, signal)
+    assert result.spectrum_freqs is not None
+    assert result.spectrum_power is not None
+    assert result.spectrum_freqs.shape == result.spectrum_power.shape
+    assert np.all(result.spectrum_freqs >= 0.0)
+    assert np.all(result.spectrum_power >= 0.0)
+    # the reported f_r must actually be the frequency of the returned peak
+    peak_idx = int(np.argmax(result.spectrum_power))
+    assert result.spectrum_freqs[peak_idx] == pytest.approx(result.f_r)
+
+
+def test_envelope_route_leaves_spectrum_fields_none():
+    t, signal, _ = _synthetic_ringdown(1e9, 500.0)
+    result = extract_envelope(t, signal)
+    assert result.spectrum_freqs is None
+    assert result.spectrum_power is None

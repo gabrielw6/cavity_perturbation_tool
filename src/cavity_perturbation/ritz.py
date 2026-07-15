@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import itertools
 import warnings
+from dataclasses import dataclass
 from typing import Callable, Sequence
 
 import numpy as np
@@ -29,6 +30,19 @@ from .perturbation import PerturbationResult, omega_tilde_to_result
 from .sample import Sample
 
 Array = np.ndarray
+
+
+@dataclass(frozen=True)
+class RitzDiagnostics:
+    """Optional per-run diagnostic data for the GUI (docs/gui_module_plan.md
+    Section 2.3) -- the mode-of-interest's mixing coefficients over
+    `basis_modes`, letting a caller reconstruct $E(r)=\\sum_i c_i E_i(r)$
+    (the reconstruction arithmetic itself lives in the GUI package's
+    `adapters/field_sampling.py`, not here, per Section 0.1 -- this dataclass
+    only exposes data, never plots it, Section 1.5)."""
+
+    basis_modes: list[CavityMode]
+    coefficients: Array  # complex, shape (len(basis_modes),) -- eigenvectors[:, k_star]
 
 _DEFAULT_N_BASIS = 5
 _DEFAULT_MAX_INDEX = 4
@@ -133,6 +147,23 @@ class RitzCorrectedModel:
         Raises ValueError if `sample.material` isn't passive (same guard as
         `PerturbationModel.evaluate`) or isn't non-magnetic (mu_r=1, Section
         2's scope)."""
+        result, _ = self._run(sample, capture=False)
+        return result
+
+    def evaluate_with_diagnostics(self, sample: Sample) -> tuple[PerturbationResult, RitzDiagnostics]:
+        """Same physics and same result as `evaluate` -- additionally
+        returns the mode-of-interest's mixing coefficients over
+        `basis_modes` (docs/gui_module_plan.md Section 2.3), the eigenvector
+        `evaluate()` already computes and currently discards."""
+        result, diagnostics = self._run(sample, capture=True)
+        assert diagnostics is not None  # capture=True always returns one
+        return result, diagnostics
+
+    def _run(self, sample: Sample, capture: bool) -> tuple[PerturbationResult, RitzDiagnostics | None]:
+        """Shared runner behind `evaluate`/`evaluate_with_diagnostics`
+        (docs/gui_module_plan.md Section 2.3, same pattern as
+        `fdtd.model.FDTDModel`'s Section 2.1) -- one code path, `capture`
+        only controls whether the diagnostics dataclass is assembled."""
         if not sample.material.is_passive:
             raise ValueError(
                 f"material {sample.material!r} is not passive "
@@ -227,7 +258,11 @@ class RitzCorrectedModel:
             wall_term = 0j
         omega_tilde = omega_k_star + wall_term
 
-        return omega_tilde_to_result(omega_tilde)
+        result = omega_tilde_to_result(omega_tilde)
+        if not capture:
+            return result, None
+        diagnostics = RitzDiagnostics(basis_modes=list(self._basis_modes), coefficients=eigenvectors[:, k_star])
+        return result, diagnostics
 
 
 def converged_ritz_model(

@@ -32,6 +32,15 @@ class RingdownResult:
     f_r: float  # Hz
     Q: float
     method: str  # 'fft' or 'envelope'
+    # docs/gui_module_plan.md Section 2.2: extract_fft already builds these
+    # internally and used to discard them -- populated there for the GUI's
+    # spectrum plot (FDTDDiagnostics, Section 2.1), reusing the array rather
+    # than recomputing an FFT. extract_envelope's time-domain route doesn't
+    # compute a spectrum at all, so these stay None there -- an existing,
+    # correct distinction, not a gap. No caller that only reads f_r/Q/method
+    # is affected (both constructors below only ever use keyword args).
+    spectrum_freqs: Array | None = None
+    spectrum_power: Array | None = None
 
 
 def _interp_crossing(freqs: Array, power: Array, peak_idx: int, level: float, direction: int) -> float | None:
@@ -105,7 +114,9 @@ def extract_fft(
     delta_f = f_high - f_low
     if delta_f <= 0.0:
         raise ExtractionError(f"non-positive -3dB linewidth {delta_f!r}")
-    return RingdownResult(f_r=f_r, Q=f_r / delta_f, method="fft")
+    return RingdownResult(
+        f_r=f_r, Q=f_r / delta_f, method="fft", spectrum_freqs=freqs, spectrum_power=power
+    )
 
 
 _EDGE_TRIM_FRONT = 0.02
