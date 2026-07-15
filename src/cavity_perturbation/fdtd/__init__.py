@@ -5,6 +5,6 @@ on a Yee grid and extracting resonance from the recorded ringdown, rather
 than by an algebraic/eigenvalue solve. See docs/fdtd_module_plan.md for the
 full design.
 """
-from .model import FDTDModel
+from .model import FDTDCancelled, FDTDModel
 
-__all__ = ["FDTDModel"]
+__all__ = ["FDTDCancelled", "FDTDModel"]

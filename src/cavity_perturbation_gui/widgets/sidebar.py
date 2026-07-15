@@ -14,10 +14,10 @@ from PySide6.QtWidgets import (
     QDoubleSpinBox,
     QFormLayout,
     QGroupBox,
-    QLabel,
     QLineEdit,
     QRadioButton,
     QStackedWidget,
+    QTabWidget,
     QVBoxLayout,
     QWidget,
 )
@@ -259,7 +259,18 @@ class _SampleSection(QWidget):
         for page in (self._sphere, self._rod, self._disk):
             self.pages.addWidget(page)
 
-        self.auto_position_label = QLabel("position: auto (field maximum)")
+        self.position_auto_radio = QRadioButton("Auto (field maximum)")
+        self.position_manual_radio = QRadioButton("Manual")
+        self.position_auto_radio.setChecked(True)
+        self.position_x = _dim_spinbox(0.0)
+        self.position_x.setRange(-_DIM_RANGE[1], _DIM_RANGE[1])
+        self.position_y = _dim_spinbox(0.0)
+        self.position_y.setRange(-_DIM_RANGE[1], _DIM_RANGE[1])
+        self.position_z = _dim_spinbox(0.0)
+        self.position_z.setRange(-_DIM_RANGE[1], _DIM_RANGE[1])
+        for position_box in (self.position_x, self.position_y, self.position_z):
+            position_box.setEnabled(False)
+
         self.orientation_combo = QComboBox()
         self.orientation_combo.addItem("aligned", userData="aligned")
         self.orientation_combo.addItem("perpendicular", userData="perpendicular")
@@ -282,7 +293,11 @@ class _SampleSection(QWidget):
         form = QFormLayout()
         form.addRow("Shape", self.shape_combo)
         form.addRow(self.pages)
-        form.addRow(self.auto_position_label)
+        form.addRow(self.position_auto_radio)
+        form.addRow(self.position_manual_radio)
+        form.addRow("x [m]", self.position_x)
+        form.addRow("y [m]", self.position_y)
+        form.addRow("z [m]", self.position_z)
         form.addRow("Orientation", self.orientation_combo)
         form.addRow("eps_r", self.eps_r)
         form.addRow("tan_delta_e", self.tan_delta_e)
@@ -300,13 +315,21 @@ class _SampleSection(QWidget):
             self._sphere.radius, self._rod.radius, self._rod.length,
             self._disk.extent_x, self._disk.extent_y, self._disk.thickness,
             self.eps_r, self.tan_delta_e, self.mu_r, self.tan_delta_m,
+            self.position_x, self.position_y, self.position_z,
         ):
             widget.valueChanged.connect(self.changed)
         self.orientation_combo.currentIndexChanged.connect(self.changed)
+        self.position_manual_radio.toggled.connect(self._on_position_mode_changed)
+        for radio in (self.position_auto_radio, self.position_manual_radio):
+            radio.toggled.connect(self.changed)
 
     def _on_shape_changed(self, index: int) -> None:
         self.pages.setCurrentIndex(index)
         self.changed.emit()
+
+    def _on_position_mode_changed(self, manual: bool) -> None:
+        for box in (self.position_x, self.position_y, self.position_z):
+            box.setEnabled(manual)
 
     def shape(self) -> SampleShape:
         return self.shape_combo.currentData()
@@ -326,6 +349,9 @@ class _SampleSection(QWidget):
         length: float | None = None
         extent: tuple[float, float] | None = None
         thickness: float | None = None
+        position: tuple[float, float, float] | None = None
+        if self.position_manual_radio.isChecked():
+            position = (self.position_x.value(), self.position_y.value(), self.position_z.value())
 
         if shape == "sphere":
             radius = self._sphere.radius.value()
@@ -340,6 +366,7 @@ class _SampleSection(QWidget):
 
         return SampleParams(
             shape=shape,
+            position=position,
             radius=radius,
             length=length,
             extent=extent,
@@ -353,8 +380,11 @@ class _SampleSection(QWidget):
 
 
 class Sidebar(QWidget):
-    """Owns both the cavity and sample sections; `changed` fires whenever
-    either does."""
+    """Owns both the cavity and sample sections, shown as two tabs sharing
+    one span (rather than stacked one above the other) -- this is the
+    sidebar's own internal tab widget, distinct from `main_window.py`'s
+    top-level solver tabs, and never mixed into them. `changed` fires
+    whenever either section does."""
 
     changed = Signal()
 
@@ -362,10 +392,12 @@ class Sidebar(QWidget):
         super().__init__(parent)
         self.cavity_section = _CavitySection()
         self.sample_section = _SampleSection()
+        self.param_tabs = QTabWidget()
+        self.param_tabs.addTab(self.cavity_section, "Cavity")
+        self.param_tabs.addTab(self.sample_section, "Sample")
+
         layout = QVBoxLayout(self)
-        layout.addWidget(self.cavity_section)
-        layout.addWidget(self.sample_section)
-        layout.addStretch(1)
+        layout.addWidget(self.param_tabs)
 
         self.cavity_section.changed.connect(self.changed)
         self.sample_section.changed.connect(self.changed)

@@ -9,6 +9,24 @@ from typing import Any, Callable
 
 from PySide6.QtCore import QObject, QThread, Signal
 
+# Strong references to every (thread, worker) pair currently in flight,
+# keyed by the thread itself -- kept alive here, independent of whatever
+# the caller does with its own copy of `run_in_background`'s return value,
+# until `thread.finished` actually fires. `thread`/`worker` are parentless
+# QObjects, so PySide/shiboken gives Python outright ownership of the C++
+# objects: if the caller's last reference to `thread` is dropped (e.g. a
+# test function returning right after `worker.finished`/`.failed`, or
+# `RunBar` overwriting `self._thread` on the next run) before the
+# background thread's event loop has *actually* stopped, Python's
+# refcounting GC can destroy the still-running QThread -- Qt's own docs:
+# "Deleting a QThread while it is still running ... will result in a
+# program crash." `worker.finished`/`.failed` firing does NOT mean the
+# thread has stopped yet (`thread.quit()` only requests the stop); only
+# `thread.finished` means that. Caught directly via an intermittent
+# "Windows fatal exception: access violation" crashing a QThread with no
+# Python frame, at the end of the GUI test suite.
+_in_flight: dict[QThread, SolveWorker] = {}
+
 
 class SolveWorker(QObject):
     """Wraps a single zero-argument callable -- typically
@@ -81,6 +99,12 @@ def run_in_background(run: Callable[[], Any]) -> tuple[QThread, SolveWorker]:
     worker.finished.connect(worker.deleteLater)
     worker.failed.connect(worker.deleteLater)
     thread.finished.connect(thread.deleteLater)
+
+    # See the module-level `_in_flight` docstring: keep both objects alive
+    # in our own hands until the thread has genuinely stopped, regardless
+    # of what the caller does with its own reference to the returned pair.
+    _in_flight[thread] = worker
+    thread.finished.connect(lambda: _in_flight.pop(thread, None))
 
     thread.start()
     return thread, worker

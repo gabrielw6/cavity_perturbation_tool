@@ -8,6 +8,7 @@ others (Section 8) -- every other file here is single-purpose.
 from __future__ import annotations
 
 import math
+from typing import Callable
 
 import numpy as np
 
@@ -25,6 +26,15 @@ from .stability import stable_time_step
 from .stepper import FDTDStepper
 
 Array = np.ndarray
+
+
+class FDTDCancelled(RuntimeError):
+    """Raised from `_run` when `cancel_check` reports a user-requested stop
+    mid-simulation (docs/gui_module_plan.md Section 6's cancellation
+    addition) -- routed through `SolveWorker`'s existing exception-to-
+    `.failed`-signal path exactly like any other run failure, no separate
+    plumbing needed."""
+
 
 _DEFAULT_CELLS_PER_WAVELENGTH = 20.0
 _DEFAULT_MIN_CELLS_PER_AXIS = 8
@@ -150,18 +160,42 @@ class FDTDModel:
         result, _ = self._run(sample, capture=False)
         return result
 
-    def evaluate_with_diagnostics(self, sample: Sample) -> tuple[PerturbationResult, FDTDDiagnostics]:
+    def evaluate_with_diagnostics(
+        self,
+        sample: Sample,
+        progress_callback: Callable[[int, int], None] | None = None,
+        cancel_check: Callable[[], bool] | None = None,
+    ) -> tuple[PerturbationResult, FDTDDiagnostics]:
         """Same physics and same result as `evaluate` -- additionally
         returns the excitation waveform, ringdown spectrum, and a single
         end-of-excitation field snapshot for the GUI's plots
         (docs/gui_module_plan.md Section 2.1). `evaluate()` itself is
         untouched and stays exactly as cheap as before; this only adds
-        bookkeeping when explicitly asked for."""
-        result, diagnostics = self._run(sample, capture=True)
+        bookkeeping when explicitly asked for.
+
+        `progress_callback(current_step, total_steps)`, if given, is called
+        periodically (roughly every 1% of the run, not every step -- this
+        loop runs thousands of iterations and per-step callback overhead
+        would be noticeable) across both the excitation and record loops.
+
+        `cancel_check()`, if given, is polled every step (cheap -- a plain
+        thread-safe flag read, unlike `progress_callback`'s Qt-signal
+        overhead) and raises `FDTDCancelled` the moment it returns True,
+        stopping the simulation early (docs/gui_module_plan.md Section 6's
+        cancellation addition)."""
+        result, diagnostics = self._run(
+            sample, capture=True, progress_callback=progress_callback, cancel_check=cancel_check
+        )
         assert diagnostics is not None  # capture=True always returns one
         return result, diagnostics
 
-    def _run(self, sample: Sample, capture: bool) -> tuple[PerturbationResult, FDTDDiagnostics | None]:
+    def _run(
+        self,
+        sample: Sample,
+        capture: bool,
+        progress_callback: Callable[[int, int], None] | None = None,
+        cancel_check: Callable[[], bool] | None = None,
+    ) -> tuple[PerturbationResult, FDTDDiagnostics | None]:
         """Shared runner behind `evaluate`/`evaluate_with_diagnostics`
         (docs/gui_module_plan.md Section 2.1) -- one code path, `capture`
         only controls whether the (small, already-computed-anyway) extra
@@ -189,11 +223,18 @@ class FDTDModel:
         t0 = self._n_pulse_sigma * sigma_t
         n_pulse_steps = int(math.ceil(2.0 * t0 / dt))
 
+        duration = self._record_duration(sample, f0)
+        n_record_steps = max(int(math.ceil(duration / dt)), 16)
+        total_steps = n_pulse_steps + n_record_steps
+        progress_stride = max(total_steps // 100, 1)
+
         excitation_times = np.empty(n_pulse_steps) if capture else None
         excitation_waveform = np.empty(n_pulse_steps) if capture else None
 
         t = 0.0
         for n in range(n_pulse_steps):
+            if cancel_check is not None and cancel_check():
+                raise FDTDCancelled("FDTD run cancelled by user")
             pulse_val = float(gaussian_modulated_pulse(np.array([t]), f0, t0, sigma_t)[0])
             if capture:
                 assert excitation_times is not None and excitation_waveform is not None
@@ -202,6 +243,8 @@ class FDTDModel:
             source = {c: pulse_val * self._source_profile[c] for c in E_COMPONENTS}
             stepper.step(e_source=source)
             t += dt
+            if progress_callback is not None and n % progress_stride == 0:
+                progress_callback(n, total_steps)
 
         # 0.3's "end of excitation" choice -- the natural place, since it's
         # exactly where the code already transitions from "inject" to
@@ -211,16 +254,20 @@ class FDTDModel:
             field_snapshot = {c: stepper.E[c].copy() for c in E_COMPONENTS}
             field_snapshot.update({c: stepper.H[c].copy() for c in H_COMPONENTS})
 
-        duration = self._record_duration(sample, f0)
-        n_record_steps = max(int(math.ceil(duration / dt)), 16)
-
         times = np.empty(n_record_steps)
         probe_series = np.empty(n_record_steps)
         for n in range(n_record_steps):
+            if cancel_check is not None and cancel_check():
+                raise FDTDCancelled("FDTD run cancelled by user")
             stepper.step(e_source=None)
             t += dt
             times[n] = t
             probe_series[n] = stepper.probe_value(self._probe_point, self._probe_component)
+            if progress_callback is not None and n % progress_stride == 0:
+                progress_callback(n_pulse_steps + n, total_steps)
+
+        if progress_callback is not None:
+            progress_callback(total_steps, total_steps)
 
         ringdown = extract_fft(times, probe_series)
         f_r_fdtd, Q_fdtd = ringdown.f_r, ringdown.Q

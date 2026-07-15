@@ -7,10 +7,10 @@ from __future__ import annotations
 import functools
 
 from PySide6.QtCore import Signal
-from PySide6.QtWidgets import QLabel, QPushButton, QVBoxLayout, QWidget
+from PySide6.QtWidgets import QHBoxLayout, QLabel, QPushButton, QVBoxLayout, QWidget
 
 from cavity_perturbation.inverse import Measurement
-from cavity_perturbation_gui.adapters.field_sampling import plane_through_point, sample_closed_form_field
+from cavity_perturbation_gui.adapters.field_sampling import Axis, plane_through_point, sample_closed_form_field
 from cavity_perturbation_gui.adapters.geometry_description import describe_cavity, describe_sample
 from cavity_perturbation_gui.adapters.inversion_runner import measurement_from_result
 from cavity_perturbation_gui.adapters.perturbation_runner import PerturbationRunResult, run_perturbation
@@ -18,7 +18,7 @@ from cavity_perturbation_gui.widgets.curve_plot import CurvePlot
 from cavity_perturbation_gui.widgets.field_plane_view import FieldPlaneView, vector_magnitude
 from cavity_perturbation_gui.widgets.geometry_view3d import GeometryView3D
 from cavity_perturbation_gui.widgets.sidebar import Sidebar
-from cavity_perturbation_gui.widgets.tabs._common import RunBar
+from cavity_perturbation_gui.widgets.tabs._common import PlotColumn, RunBar
 
 _FIELD_NOTE = (
     "Field plot shows the unperturbed cavity field -- the perturbation model corrects the "
@@ -46,11 +46,15 @@ class PerturbationTab(QWidget):
         layout.addWidget(self.run_bar)
         layout.addWidget(self.summary_label)
         layout.addWidget(self.use_as_measurement_button)
-        layout.addWidget(self.curve_plot)
-        layout.addWidget(self.field_view)
+
+        plots_row = QHBoxLayout()
+        plots_row.addWidget(PlotColumn([self.curve_plot]), 1)
+        plots_row.addWidget(self.field_view, 1)
+        layout.addLayout(plots_row)
 
         self.run_bar.button.clicked.connect(self._on_run_clicked)
         self.use_as_measurement_button.clicked.connect(self._on_use_as_measurement_clicked)
+        self.field_view.plane2_axes_changed.connect(self._redraw_plane2)
 
     def _on_run_clicked(self) -> None:
         cavity_params = self._sidebar.cavity_params()
@@ -77,16 +81,26 @@ class PerturbationTab(QWidget):
         # perturbation.py's own evaluate() uses).
         center = getattr(result.sample.region, "center")
         plane_xy = plane_through_point(cavity, center, ("x", "y"))
-        plane_xz = plane_through_point(cavity, center, ("x", "z"))
         grid1, values1 = sample_closed_form_field(cavity, result.field_provider, plane_xy, field="E")
-        grid2, values2 = sample_closed_form_field(cavity, result.field_provider, plane_xz, field="E")
         self.field_view.set_note(_FIELD_NOTE)
         self.field_view.plane1.set_title("|E| (x-y plane)")
         self.field_view.plane1.show_scalar_field(grid1, vector_magnitude(values1))
-        self.field_view.plane2.set_title("|E| (x-z plane)")
-        self.field_view.plane2.show_scalar_field(grid2, vector_magnitude(values2))
+        self._redraw_plane2(self.field_view.plane2.current_axes())
 
         self._geometry_view.set_geometry(describe_cavity(cavity), describe_sample(result.sample.region))
+
+    def _redraw_plane2(self, axes: tuple[Axis, Axis]) -> None:
+        """Resample plane2 at the currently-selected cross-section from the
+        last result -- no new solver run needed, the field is already in
+        hand. A no-op before the first run (nothing to resample yet)."""
+        if self.last_result is None:
+            return
+        cavity = self.last_result.cavity
+        center = getattr(self.last_result.sample.region, "center")
+        plane = plane_through_point(cavity, center, axes)
+        grid, values = sample_closed_form_field(cavity, self.last_result.field_provider, plane, field="E")
+        self.field_view.plane2.set_title(f"|E| ({axes[0]}-{axes[1]} plane)")
+        self.field_view.plane2.show_scalar_field(grid, vector_magnitude(values))
 
     def _on_use_as_measurement_clicked(self) -> None:
         if self.last_result is None:

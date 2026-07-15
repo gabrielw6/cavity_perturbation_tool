@@ -3,6 +3,7 @@ Section 4."""
 from __future__ import annotations
 
 from dataclasses import dataclass
+from typing import Callable
 
 from cavity_perturbation.cavity import CavityMode
 from cavity_perturbation.fdtd import FDTDModel
@@ -38,6 +39,8 @@ def run_fdtd(
     cells_per_wavelength: float = _DEFAULT_CELLS_PER_WAVELENGTH,
     min_cells_per_axis: int = _DEFAULT_MIN_CELLS_PER_AXIS,
     record_periods: float = _DEFAULT_RECORD_PERIODS,
+    progress_callback: Callable[[int, int], None] | None = None,
+    cancel_check: Callable[[], bool] | None = None,
 ) -> FDTDRunResult:
     cavity = build_cavity(cavity_params)
     field_provider = AnalyticalField(cavity)
@@ -50,7 +53,9 @@ def run_fdtd(
         min_cells_per_axis=min_cells_per_axis,
         record_periods=record_periods,
     )
-    result, diagnostics = model.evaluate_with_diagnostics(sample)
+    result, diagnostics = model.evaluate_with_diagnostics(
+        sample, progress_callback=progress_callback, cancel_check=cancel_check
+    )
     return FDTDRunResult(
         cavity=cavity,
         model=model,

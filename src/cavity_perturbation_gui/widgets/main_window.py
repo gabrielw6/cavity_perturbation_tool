@@ -1,4 +1,4 @@
-"""widgets/main_window.py -- tabs + sidebar + log bar (docs/gui_module_plan.md
+"""widgets/main_window.py -- tabs + sidebar + log tab (docs/gui_module_plan.md
 Section 5). Wires the four forward tabs' `measurement_captured` signal to
 the Inversion tab (Section 5.6) -- the one place this package lets a tab
 reach another, kept in the window rather than having tabs reference each
@@ -6,7 +6,7 @@ other directly."""
 from __future__ import annotations
 
 from PySide6.QtCore import Qt
-from PySide6.QtWidgets import QDockWidget, QHBoxLayout, QMainWindow, QSplitter, QTabWidget, QWidget
+from PySide6.QtWidgets import QHBoxLayout, QMainWindow, QSplitter, QTabWidget, QWidget
 
 from cavity_perturbation_gui.logging_bridge import install_logging_bridge
 from cavity_perturbation_gui.widgets.geometry_view3d import GeometryView3D
@@ -48,6 +48,7 @@ class MainWindow(QMainWindow):
         self.tabs.addTab(self.fdtd_tab, "FDTD")
         self.tabs.addTab(self.geometry_tab, "3D Geometry")
         self.tabs.addTab(self.inversion_tab, "Inversion")
+        self.tabs.addTab(self.log_panel, "Log")
 
         for tab in (self.perturbation_tab, self.variational_tab, self.fdtd_tab):
             tab.measurement_captured.connect(self.inversion_tab.add_measurement)
@@ -65,12 +66,3 @@ class MainWindow(QMainWindow):
         central_layout = QHBoxLayout(central)
         central_layout.addWidget(left_right_splitter)
         self.setCentralWidget(central)
-
-        log_dock = self._make_log_dock()
-        self.addDockWidget(Qt.DockWidgetArea.BottomDockWidgetArea, log_dock)
-
-    def _make_log_dock(self) -> QDockWidget:
-        dock = QDockWidget("Log")
-        dock.setWidget(self.log_panel)
-        dock.setAllowedAreas(Qt.DockWidgetArea.BottomDockWidgetArea)
-        return dock

@@ -45,6 +45,29 @@ class CurvePlot(QWidget):
         curve = self.plot_widget.plot(x, y, pen=pg.mkPen(color, width=2), name=label)
         self._items.append(curve)
 
+    def zoom_x_to_peak(self, x: Array, y: Array, margin: float = 5.0) -> None:
+        """Zoom the x-axis to the region around `y`'s peak, sized to
+        `margin` times the peak's own half-maximum full-width -- a
+        spectrum-analyzer-style "zoom to resonance", data-driven from the
+        already-plotted trace rather than assuming a lineshape or requiring
+        a separately-fitted Q (the FDTD tab's ringdown spectrum, Section 5)."""
+        if len(x) == 0:
+            return
+        peak_idx = int(np.argmax(y))
+        half_max = 0.5 * float(y[peak_idx])
+        above = y >= half_max
+        lo = peak_idx
+        while lo > 0 and above[lo - 1]:
+            lo -= 1
+        hi = peak_idx
+        while hi < len(y) - 1 and above[hi + 1]:
+            hi += 1
+        full_span = float(x[-1]) - float(x[0])
+        fwhm = max(float(x[hi]) - float(x[lo]), full_span * 1e-4)
+        center = float(x[peak_idx])
+        half_width = margin * fwhm
+        self.plot_widget.setXRange(center - half_width, center + half_width, padding=0)
+
     def plot_lorentzian(self, f_res: float, Q: float, label: str, color: str = "w", n_points: int = 2000) -> None:
         """If `Q` is finite, plots a normalized Lorentzian sized to show
         its own full linewidth; if `Q` is infinite (no loss at all), draws

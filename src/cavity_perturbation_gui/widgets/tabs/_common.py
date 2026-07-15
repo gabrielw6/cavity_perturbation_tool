@@ -12,13 +12,15 @@ from __future__ import annotations
 from typing import Any, Callable
 
 import numpy as np
-from PySide6.QtCore import QThread
-from PySide6.QtWidgets import QHBoxLayout, QLabel, QPushButton, QWidget
+from PySide6.QtCore import QThread, Qt
+from PySide6.QtWidgets import QHBoxLayout, QLabel, QPushButton, QScrollArea, QVBoxLayout, QWidget
 
 from cavity_perturbation_gui.logging_bridge import get_logger
 from cavity_perturbation_gui.workers.solve_worker import SolveWorker, run_in_background
 
 Array = np.ndarray
+
+_DEFAULT_MIN_PLOT_HEIGHT = 220
 
 
 class RunBar(QWidget):
@@ -46,12 +48,18 @@ class RunBar(QWidget):
         build_call: Callable[[], Callable[[], Any]],
         on_success: Callable[[Any], None],
         tab_name: str,
+        on_failure: Callable[[BaseException], None] | None = None,
     ) -> None:
         """`build_call` runs on the GUI thread (so a bad sidebar value
         raises immediately, before ever touching a background thread) and
         must return a zero-argument callable -- typically
         `functools.partial(run_perturbation, cavity_params, sample_params)`
-        -- which is what actually executes in the background."""
+        -- which is what actually executes in the background.
+
+        `on_failure`, if given, additionally runs after this bar's own
+        failure handling (status label + log) -- e.g. the FDTD tab's Stop
+        button uses it to reset its own state regardless of whether the run
+        failed normally or was cancelled (docs/gui_module_plan.md Section 6)."""
         try:
             call = build_call()
         except Exception as exc:  # noqa: BLE001 -- Section 4: never let a bad parameter crash the app
@@ -74,6 +82,34 @@ class RunBar(QWidget):
             self.button.setEnabled(True)
             self.status_label.setText(f"error: {exc}")
             self._logger.error("%s: run failed: %s", tab_name, exc)
+            if on_failure is not None:
+                on_failure(exc)
 
         self._worker.finished.connect(_on_finished)
         self._worker.failed.connect(_on_failed)
+
+
+class PlotColumn(QScrollArea):
+    """Left-hand 2D-plot column shared by all four forward tabs (Section 5):
+    stacks one or more plot widgets vertically, each given a sane minimum
+    height, inside a scroll area -- so a tab with several plots (FDTD's
+    resonance/excitation/spectrum trio) gets a scrollbar instead of
+    squeezing every plot down to nothing when the window is short."""
+
+    def __init__(
+        self,
+        plots: list[QWidget],
+        min_plot_height: int = _DEFAULT_MIN_PLOT_HEIGHT,
+        parent: QWidget | None = None,
+    ) -> None:
+        super().__init__(parent)
+        self.setWidgetResizable(True)
+        self.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        self.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded)
+
+        container = QWidget()
+        layout = QVBoxLayout(container)
+        for plot in plots:
+            plot.setMinimumHeight(min_plot_height)
+            layout.addWidget(plot)
+        self.setWidget(container)
