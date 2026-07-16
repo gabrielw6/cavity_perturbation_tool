@@ -13,9 +13,10 @@ from cavity_perturbation.cavity import (
     CylindricalCavity,
     ModeIndex,
     RectangularCavity,
+    ToroidalCavity,
 )
 
-CavityType = Literal["rectangular", "cylindrical", "coaxial"]
+CavityType = Literal["rectangular", "cylindrical", "coaxial", "toroidal"]
 
 
 @dataclass(frozen=True)
@@ -49,6 +50,9 @@ def build_cavity(params: CavityParams) -> CavityMode:
     if params.cavity_type == "coaxial":
         r_inner, r_outer, length = params.dimensions
         return CoaxialCavity(r_inner, r_outer, length, mode, eps=eps, mu=mu)
+    if params.cavity_type == "toroidal":
+        R, a = params.dimensions
+        return ToroidalCavity(R, a, mode, eps=eps, mu=mu)
     raise ValueError(f"unknown cavity_type {params.cavity_type!r}")
 
 
@@ -66,6 +70,8 @@ def cavity_constructor_and_args(
         return CylindricalCavity, params.dimensions, mode
     if params.cavity_type == "coaxial":
         return CoaxialCavity, params.dimensions, mode
+    if params.cavity_type == "toroidal":
+        return ToroidalCavity, params.dimensions, mode
     raise ValueError(f"unknown cavity_type {params.cavity_type!r}")
 
 

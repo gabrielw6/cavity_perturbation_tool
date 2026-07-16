@@ -35,15 +35,20 @@ class VariationalTab(QWidget):
         self.n_basis_spin.setValue(5)
 
         self.run_bar = RunBar("Run Variational (Ritz)")
+        self.refresh_button = QPushButton("Refresh field view")
         self.summary_label = QLabel("")
         self.use_as_measurement_button = QPushButton("Use this result as a measurement")
         self.use_as_measurement_button.setEnabled(False)
         self.curve_plot = CurvePlot(title="Loaded resonance (Ritz)", x_label="frequency [Hz]", y_label="normalized response")
         self.field_view = FieldPlaneView()
 
+        run_row = QHBoxLayout()
+        run_row.addWidget(self.run_bar)
+        run_row.addWidget(self.refresh_button)
+
         layout = QVBoxLayout(self)
         layout.addWidget(self.n_basis_spin)
-        layout.addWidget(self.run_bar)
+        layout.addLayout(run_row)
         layout.addWidget(self.summary_label)
         layout.addWidget(self.use_as_measurement_button)
 
@@ -53,6 +58,7 @@ class VariationalTab(QWidget):
         layout.addLayout(plots_row)
 
         self.run_bar.button.clicked.connect(self._on_run_clicked)
+        self.refresh_button.clicked.connect(self._on_refresh_clicked)
         self.use_as_measurement_button.clicked.connect(self._on_use_as_measurement_clicked)
         self.field_view.plane2_axes_changed.connect(self._redraw_plane2)
 
@@ -79,18 +85,31 @@ class VariationalTab(QWidget):
         self.curve_plot.plot_lorentzian(r.f_calc, r.Q_calc, "loaded (Ritz)", "g")
 
         cavity = result.cavity
-        # SampleRegion doesn't declare `.center` on its ABC (Sphere/Cylinder/
-        # Slab each have their own -- same duck-typing convention
-        # perturbation.py's own evaluate() uses).
-        center = getattr(result.sample.region, "center")
-        plane_xy = plane_through_point(cavity, center, ("x", "y"))
-        grid1, values1 = sample_ritz_field(cavity, result.diagnostics, plane_xy)
         self.field_view.set_note("Field plot is the genuine Ritz reconstruction E(r) = sum_i c_i E_i(r).")
-        self.field_view.plane1.set_title("|E| (x-y plane)")
-        self.field_view.plane1.show_scalar_field(grid1, vector_magnitude(values1))
+        self._redraw_plane1()
         self._redraw_plane2(self.field_view.plane2.current_axes())
 
         self._geometry_view.set_geometry(describe_cavity(cavity), describe_sample(result.sample.region))
+
+    def _on_refresh_clicked(self) -> None:
+        """Re-issue both planes' draw calls against the cached last result,
+        with no new solver run -- a manual escape hatch for pyqtgraph's own
+        occasional stale-repaint quirks (docs/gui_module_plan.md Section 5)."""
+        self._redraw_plane1()
+        self._redraw_plane2(self.field_view.plane2.current_axes())
+
+    def _redraw_plane1(self) -> None:
+        if self.last_result is None:
+            return
+        cavity = self.last_result.cavity
+        # SampleRegion doesn't declare `.center` on its ABC (Sphere/Cylinder/
+        # Slab each have their own -- same duck-typing convention
+        # perturbation.py's own evaluate() uses).
+        center = getattr(self.last_result.sample.region, "center")
+        plane_xy = plane_through_point(cavity, center, ("x", "y"))
+        grid1, values1 = sample_ritz_field(cavity, self.last_result.diagnostics, plane_xy)
+        self.field_view.plane1.set_title("|E| (x-y plane)")
+        self.field_view.plane1.show_scalar_field(grid1, vector_magnitude(values1))
 
     def _redraw_plane2(self, axes: tuple[Axis, Axis]) -> None:
         """Resample plane2 at the currently-selected cross-section from the

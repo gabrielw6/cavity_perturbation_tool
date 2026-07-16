@@ -5,7 +5,7 @@ from __future__ import annotations
 
 import functools
 
-from PySide6.QtWidgets import QHBoxLayout, QLabel, QVBoxLayout, QWidget
+from PySide6.QtWidgets import QHBoxLayout, QLabel, QPushButton, QVBoxLayout, QWidget
 
 from cavity_perturbation_gui.adapters.analytical_runner import AnalyticalRunResult, run_analytical
 from cavity_perturbation_gui.adapters.field_sampling import Axis, plane_through_point, sample_closed_form_field
@@ -25,12 +25,17 @@ class AnalyticalTab(QWidget):
         self.last_result: AnalyticalRunResult | None = None
 
         self.run_bar = RunBar("Run Analytical")
+        self.refresh_button = QPushButton("Refresh field view")
         self.summary_label = QLabel("")
         self.curve_plot = CurvePlot(title="Empty-cavity resonance", x_label="frequency [Hz]", y_label="normalized response")
         self.field_view = FieldPlaneView()
 
+        run_row = QHBoxLayout()
+        run_row.addWidget(self.run_bar)
+        run_row.addWidget(self.refresh_button)
+
         layout = QVBoxLayout(self)
-        layout.addWidget(self.run_bar)
+        layout.addLayout(run_row)
         layout.addWidget(self.summary_label)
 
         plots_row = QHBoxLayout()
@@ -39,6 +44,7 @@ class AnalyticalTab(QWidget):
         layout.addLayout(plots_row)
 
         self.run_bar.button.clicked.connect(self._on_run_clicked)
+        self.refresh_button.clicked.connect(self._on_refresh_clicked)
         self.field_view.plane2_axes_changed.connect(self._redraw_plane2)
 
     def _on_run_clicked(self) -> None:
@@ -57,14 +63,29 @@ class AnalyticalTab(QWidget):
         self.curve_plot.plot_lorentzian(r.f_calc, r.Q_calc, "empty cavity", "c")
 
         cavity = result.cavity
-        center = (cavity.bounding_box()[0] + cavity.bounding_box()[1]) / 2.0
-        plane_xy = plane_through_point(cavity, center, ("x", "y"))
-        grid1, values1 = sample_closed_form_field(cavity, result.field_provider, plane_xy, field="E")
-        self.field_view.plane1.set_title("|E| (x-y plane)")
-        self.field_view.plane1.show_scalar_field(grid1, vector_magnitude(values1))
+        self._redraw_plane1()
         self._redraw_plane2(self.field_view.plane2.current_axes())
 
         self._geometry_view.set_geometry(describe_cavity(cavity), None)
+
+    def _on_refresh_clicked(self) -> None:
+        """Re-issue both planes' draw calls against the cached last result,
+        with no new solver run -- a manual escape hatch for pyqtgraph's own
+        occasional stale-repaint quirks (docs/gui_module_plan.md Section 5),
+        on direct user report that FDTD's field plots didn't always reflect
+        the latest run."""
+        self._redraw_plane1()
+        self._redraw_plane2(self.field_view.plane2.current_axes())
+
+    def _redraw_plane1(self) -> None:
+        if self.last_result is None:
+            return
+        cavity = self.last_result.cavity
+        center = (cavity.bounding_box()[0] + cavity.bounding_box()[1]) / 2.0
+        plane_xy = plane_through_point(cavity, center, ("x", "y"))
+        grid1, values1 = sample_closed_form_field(cavity, self.last_result.field_provider, plane_xy, field="E")
+        self.field_view.plane1.set_title("|E| (x-y plane)")
+        self.field_view.plane1.show_scalar_field(grid1, vector_magnitude(values1))
 
     def _redraw_plane2(self, axes: tuple[Axis, Axis]) -> None:
         """Resample plane2 at the currently-selected cross-section from the

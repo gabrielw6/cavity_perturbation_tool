@@ -54,6 +54,25 @@ def phi_sin2_integral(n: int) -> float:
     return np.pi * (1.0 - delta_n0)
 
 
+def periodic_cos2_integral(l: int) -> float:
+    """Integral over [0, 2*pi) of cos^2(l*theta) dtheta -- the toroidal
+    cavity's periodic-envelope analogue of `cos2_integral`. NOT the same
+    formula: `cos2_integral(k, L)` is a *finite-domain* [0, L] integral for a
+    standing wave pinned against two end walls (normalized so k=0 gives L,
+    not 2L); this is a *full-period* integral of a function that is already
+    exactly periodic on [0, 2*pi) with no boundary to pin against. Don't
+    substitute one for the other -- same superficial "cos^2 of a linear
+    argument" shape, different domain and different l=0 normalization."""
+    return 2.0 * np.pi if l == 0 else np.pi
+
+
+def periodic_sin2_integral(l: int) -> float:
+    """Integral over [0, 2*pi) of sin^2(l*theta) dtheta -- see
+    `periodic_cos2_integral`'s docstring for why this is not
+    `sin2_integral`."""
+    return 0.0 if l == 0 else np.pi
+
+
 def bessel_tm_radial_integral(n: int, X_np: float, a: float) -> float:
     """Integral over [0, a] of rho * J_n(X_np * rho/a)^2 drho.
 

@@ -90,13 +90,36 @@ class _CoaxialPage(QWidget):
         return (self.r_inner.value(), self.r_outer.value(), self.length.value())
 
 
+class _ToroidalPage(QWidget):
+    """R (major radius), a (minor/tube radius) -- docs/toroidal_cavity_plan.md's
+    thin-torus approximation, a << R. Defaults keep R/a modest (5x) rather
+    than deeply thin, matching the same "cheap to explore interactively"
+    reasoning as the FDTD cross-validation test's own R/a choice."""
+
+    def __init__(self, parent: QWidget | None = None) -> None:
+        super().__init__(parent)
+        self.R = _dim_spinbox(0.05)
+        self.a = _dim_spinbox(0.01)
+        layout = QFormLayout(self)
+        layout.addRow("R (major) [m]", self.R)
+        layout.addRow("a (minor) [m]", self.a)
+
+    def dimensions(self) -> tuple[float, ...]:
+        return (self.R.value(), self.a.value())
+
+
 _CAVITY_PAGES: tuple[tuple[CavityType, str], ...] = (
     ("rectangular", "Rectangular"),
     ("cylindrical", "Cylindrical"),
     ("coaxial", "Coaxial"),
+    ("toroidal", "Toroidal"),
 )
-_DEFAULT_MODE_KIND: dict[CavityType, str] = {"rectangular": "TE", "cylindrical": "TM", "coaxial": "TEM"}
-_DEFAULT_MODE_INDICES: dict[CavityType, str] = {"rectangular": "0, 1, 1", "cylindrical": "0, 1, 0", "coaxial": "1"}
+_DEFAULT_MODE_KIND: dict[CavityType, str] = {
+    "rectangular": "TE", "cylindrical": "TM", "coaxial": "TEM", "toroidal": "TM",
+}
+_DEFAULT_MODE_INDICES: dict[CavityType, str] = {
+    "rectangular": "0, 1, 1", "cylindrical": "0, 1, 0", "coaxial": "1", "toroidal": "0, 1, 1",
+}
 
 
 class _CavitySection(QWidget):
@@ -112,7 +135,8 @@ class _CavitySection(QWidget):
         self._rect = _RectangularPage()
         self._cyl = _CylindricalPage()
         self._coax = _CoaxialPage()
-        for page in (self._rect, self._cyl, self._coax):
+        self._torus = _ToroidalPage()
+        for page in (self._rect, self._cyl, self._coax, self._torus):
             self.pages.addWidget(page)
 
         self.mode_kind_edit = QLineEdit(_DEFAULT_MODE_KIND["rectangular"])
@@ -158,6 +182,7 @@ class _CavitySection(QWidget):
             self._rect.a, self._rect.b, self._rect.c,
             self._cyl.radius, self._cyl.length,
             self._coax.r_inner, self._coax.r_outer, self._coax.length,
+            self._torus.R, self._torus.a,
             self.bg_eps_r, self.bg_mu_r, self.conductivity_box, self.rs_box,
         ):
             widget.valueChanged.connect(self.changed)
@@ -185,7 +210,9 @@ class _CavitySection(QWidget):
             return self._rect.dimensions()
         if cavity_type == "cylindrical":
             return self._cyl.dimensions()
-        return self._coax.dimensions()
+        if cavity_type == "coaxial":
+            return self._coax.dimensions()
+        return self._torus.dimensions()
 
     def cavity_params(self) -> CavityParams:
         return CavityParams(

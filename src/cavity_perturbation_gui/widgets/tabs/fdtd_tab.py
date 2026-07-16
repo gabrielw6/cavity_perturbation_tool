@@ -61,6 +61,7 @@ class FDTDTab(QWidget):
         self.run_bar = RunBar("Run FDTD")
         self.stop_button = QPushButton("Stop")
         self.stop_button.setEnabled(False)
+        self.refresh_button = QPushButton("Refresh field view")
         self.progress_bar = QProgressBar()
         self.progress_bar.setRange(0, 1)
         self.progress_bar.setValue(0)
@@ -84,6 +85,7 @@ class FDTDTab(QWidget):
         run_row = QHBoxLayout()
         run_row.addWidget(self.run_bar)
         run_row.addWidget(self.stop_button)
+        run_row.addWidget(self.refresh_button)
         run_row.addWidget(self.progress_bar)
 
         layout = QVBoxLayout(self)
@@ -102,6 +104,7 @@ class FDTDTab(QWidget):
 
         self.run_bar.button.clicked.connect(self._on_run_clicked)
         self.stop_button.clicked.connect(self._on_stop_clicked)
+        self.refresh_button.clicked.connect(self._on_refresh_clicked)
         self.use_as_measurement_button.clicked.connect(self._on_use_as_measurement_clicked)
         self.field_view.plane2_axes_changed.connect(self._redraw_plane2)
 
@@ -151,6 +154,16 @@ class FDTDTab(QWidget):
         self.curve_plot.clear()
         self.curve_plot.plot_lorentzian(r.f_calc, r.Q_calc, "loaded (FDTD)", "r")
 
+        # Field/geometry redraw happens before the excitation/spectrum plots
+        # and their zoom-to-peak call -- unrelated curve-plot logic (e.g. a
+        # future change to zoom_x_to_peak) raising should never be able to
+        # block the field view as a side effect of code ordering.
+        cavity = result.cavity
+        self.field_view.set_note(_FIELD_NOTE)
+        self._redraw_plane1()
+        self._redraw_plane2(self.field_view.plane2.current_axes())
+        self._geometry_view.set_geometry(describe_cavity(cavity), describe_sample(result.sample.region))
+
         diag = result.diagnostics
         self.excitation_plot.clear()
         self.excitation_plot.plot_xy(diag.excitation_times, diag.excitation_waveform, "excitation", "y")
@@ -160,19 +173,28 @@ class FDTDTab(QWidget):
             self.spectrum_plot.plot_xy(diag.spectrum_freqs, diag.spectrum_power, "ringdown spectrum", "y")
             self.spectrum_plot.zoom_x_to_peak(diag.spectrum_freqs, diag.spectrum_power)
 
-        cavity = result.cavity
+    def _on_refresh_clicked(self) -> None:
+        """Re-issue both planes' draw calls against the cached last result,
+        with no new solver run -- a manual escape hatch for pyqtgraph's own
+        occasional stale-repaint quirks, on direct user report that FDTD's
+        field plots didn't always reflect the latest run
+        (docs/gui_module_plan.md Section 5)."""
+        self._redraw_plane1()
+        self._redraw_plane2(self.field_view.plane2.current_axes())
+
+    def _redraw_plane1(self) -> None:
+        if self.last_result is None:
+            return
+        cavity = self.last_result.cavity
+        diag = self.last_result.diagnostics
         # SampleRegion doesn't declare `.center` on its ABC (Sphere/Cylinder/
         # Slab each have their own -- same duck-typing convention
         # perturbation.py's own evaluate() uses).
-        center = getattr(result.sample.region, "center")
+        center = getattr(self.last_result.sample.region, "center")
         plane_xy = plane_through_point(cavity, center, ("x", "y"))
         grid1, values1 = sample_fdtd_snapshot(cavity, diag, plane_xy, component="Ex")
-        self.field_view.set_note(_FIELD_NOTE)
         self.field_view.plane1.set_title("Ex (x-y plane)")
         self.field_view.plane1.show_scalar_field(grid1, values1)
-        self._redraw_plane2(self.field_view.plane2.current_axes())
-
-        self._geometry_view.set_geometry(describe_cavity(cavity), describe_sample(result.sample.region))
 
     def _redraw_plane2(self, axes: tuple[Axis, Axis]) -> None:
         """Resample plane2 at the currently-selected cross-section from the

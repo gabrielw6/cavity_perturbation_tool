@@ -10,7 +10,13 @@ from typing import Literal
 import numpy as np
 from numpy.typing import NDArray
 
-from cavity_perturbation.cavity import CavityMode, CoaxialCavity, CylindricalCavity, RectangularCavity
+from cavity_perturbation.cavity import (
+    CavityMode,
+    CoaxialCavity,
+    CylindricalCavity,
+    RectangularCavity,
+    ToroidalCavity,
+)
 from cavity_perturbation.sample import Cylinder, SampleRegion, Slab, Sphere
 
 Vec3 = tuple[float, float, float]
@@ -58,7 +64,20 @@ class SlabPrimitive:
     kind: Literal["slab"] = "slab"
 
 
-CavityPrimitive = BoxPrimitive | CylinderPrimitive | AnnulusPrimitive
+@dataclass(frozen=True)
+class TorusPrimitive:
+    """`ToroidalCavity`'s ring always lies in the x-y plane by construction
+    (`theta = atan2(y, x)`, docs/toroidal_cavity_plan.md Section 1) -- unlike
+    the other cavity primitives, no `axis`/orientation field, since there's
+    nothing to configure."""
+
+    center: Vec3
+    major_radius: float
+    minor_radius: float
+    kind: Literal["torus"] = "torus"
+
+
+CavityPrimitive = BoxPrimitive | CylinderPrimitive | AnnulusPrimitive | TorusPrimitive
 SamplePrimitive = SpherePrimitive | CylinderPrimitive | SlabPrimitive
 
 
@@ -77,6 +96,8 @@ def describe_cavity(cavity: CavityMode) -> CavityPrimitive:
             outer_radius=cavity.b,
             length=cavity.L,
         )
+    if isinstance(cavity, ToroidalCavity):
+        return TorusPrimitive(center=(0.0, 0.0, 0.0), major_radius=cavity.R, minor_radius=cavity.a)
     raise ValueError(f"unknown CavityMode subtype {type(cavity)!r}")
 
 

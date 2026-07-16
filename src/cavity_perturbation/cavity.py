@@ -673,3 +673,325 @@ class CoaxialCavity(CavityMode):
         x, y, z = r[..., 0], r[..., 1], r[..., 2]
         rho = np.hypot(x, y)
         return (self.a <= rho) & (rho <= self.b) & (0 <= z) & (z <= self.L)
+
+
+class ToroidalCavity(CavityMode):
+    """TM_npl / TE_npl modes of a torus (major radius R, minor/tube radius
+    a), per docs/toroidal_cavity_plan.md.
+
+    Scope decision: **thin-torus approximation only** (a << R), not an exact
+    torus solution -- exactly analogous to `CoaxialCavity`'s TEM-only scope
+    (Section 3.1 there): an exact torus eigenproblem has no closed form (it
+    doesn't separate in any standard orthogonal coordinate system the way
+    the rectangular/cylindrical/coaxial problems do), so this class instead
+    treats the tube, at each point around the ring, as a locally straight
+    circular waveguide of radius `a` carrying a standing-wave pattern
+    `cos(l*theta)`/`sin(l*theta)` around the ring (`theta` = angle around
+    the major circle) in place of the cylindrical cavity's `cos`/`sin(q*pi
+    z/d)` standing wave along a straight axis. This drops O(a/R) curvature
+    ("connection") terms that a rigorous toroidal-coordinate treatment would
+    include -- deliberate, and quantified directly (not assumed) by this
+    class's own curl-residual convergence test and its FDTD cross-check
+    (`contains()` below is exact, so FDTD can simulate the true geometry
+    independent of this approximation).
+
+    `mode.indices` = (n, p, l): n = azimuthal index around the tube
+    cross-section (same role as `CylindricalCavity`'s n), p = radial
+    (Bessel-zero) index (same role as `CylindricalCavity`'s p), l = the
+    periodic standing-wave index around the big ring (plays the role of
+    `CylindricalCavity`'s axial index q, but with wavenumber l/R -- a
+    periodic ring has no end walls to set a q*pi/d-style quantization
+    against). Validity mirrors `CylindricalCavity` exactly with l standing
+    in for q: TM_npl requires l >= 0, TE_npl requires l >= 1 -- this
+    specific choice (not a different indexing scheme) is what lets
+    `ritz.py`'s `nearest_basis_modes` enumerate/construct/reject candidate
+    ToroidalCavity modes with zero changes to `ritz.py` itself, the same way
+    it already does for `CylindricalCavity`.
+
+    Coordinates: `theta = atan2(y, x)` (position around the big ring),
+    `rho_big = hypot(x, y)`, then local tube coordinates
+    `rho_local = hypot(rho_big - R, z)`, `phi_local = atan2(z, rho_big - R)`.
+    This mapping is exact and used unmodified for `contains()`/
+    `bounding_box()` regardless of the field approximation above.
+    """
+
+    _RHO_TOL_FACTOR = 1e-9
+
+    def __init__(
+        self,
+        R: float,
+        a: float,
+        mode: ModeIndex | None = None,
+        amplitude: complex = 1.0,
+        eps: float = constants.epsilon_0,
+        mu: float = constants.mu_0,
+    ) -> None:
+        if a <= 0 or R <= a:
+            raise ValueError(
+                "ToroidalCavity requires 0 < a < R (thin-torus regime, "
+                "non-self-intersecting geometry)"
+            )
+        if mode is None:
+            mode = ModeIndex("TM", (0, 1, 1))
+        if mode.kind not in ("TE", "TM"):
+            raise ValueError(f"mode.kind must be 'TE' or 'TM', got {mode.kind!r}")
+        n, p, l = mode.indices
+        if n < 0 or p < 1:
+            raise ValueError("n >= 0 and p >= 1 required")
+        if mode.kind == "TM" and l < 0:
+            raise ValueError("TM_npl requires l >= 0")
+        if mode.kind == "TE" and l < 1:
+            raise ValueError("TE_npl requires l >= 1")
+
+        self.R = R
+        self.a = a
+        self.mode = mode
+        self.amplitude = amplitude
+        self.eps = eps
+        self.mu = mu
+        self._n, self._p, self._l = n, p, l
+
+        self._X = (
+            _num.bessel_zero_tm(n, p) if mode.kind == "TM" else _num.bessel_zero_te(n, p)
+        )
+        self._kc = self._X / a
+        self._k_c2 = self._kc**2
+        self._f0 = (
+            1.0
+            / (2.0 * np.pi * np.sqrt(eps * mu))
+            * np.sqrt(self._k_c2 + (l / R) ** 2)
+        )
+        self._omega = 2.0 * np.pi * self._f0
+
+        Phi, grad_t_Phi, grad_t_dPhi_ds = self._make_local_mode_function()
+        self._E_local, self._H_local = _num.tez_tmz_fields(
+            mode.kind, Phi, grad_t_Phi, grad_t_dPhi_ds, self._k_c2, self._omega, eps, mu
+        )
+        self._I_deriv, self._I_over_rho = self._radial_quadratures()
+
+    def _make_local_mode_function(self) -> _FieldFuncs:
+        """Builds (Phi, grad_t_Phi, grad_t_dPhi_ds) in a fictitious *local*
+        frame, fed to `numerics.tez_tmz_fields` exactly as `CylindricalCavity`
+        does -- component 0/1 of the input play the role of that class's
+        (x,y) [i.e. its own (rho,phi) pair], component 2 plays the role of
+        its z, with `theta` (not literal length) as the raw value there.
+        The role-substitution is (rho_local, phi_local, theta) <-> that
+        class's (rho, phi, z): same Bessel cross-section profile
+        `J_n(kc*rho_local)*cos(n*phi_local)`, replacing its `cos`/`sin(q*pi
+        z/d)` envelope with `cos`/`sin(l*theta)` and its wavenumber `q*pi/d`
+        with `l/R` (Section 0 of docs/toroidal_cavity_plan.md) -- `dZ_ds`
+        below is the theta-envelope's derivative *with respect to arc
+        length* `R*theta`, not raw `theta`, which is what keeps this
+        dimensionally consistent with `k_c2` (1/length^2) exactly the way
+        `CylindricalCavity`'s own `dZ/dz` is (z already being a length).
+        The public `E`/`H` below feed this a synthetic (xi, eta, theta)
+        triple (xi = rho_big - R, eta = z) and then rotate the 3-vector this
+        produces from that local frame into true Cartesian -- see `E`/`H`."""
+        a = self.a
+        n, l, R = self._n, self._l, self.R
+        kc = self._kc
+        amp = self.amplitude
+        rho_tol = self._RHO_TOL_FACTOR * a
+
+        def local_to_polar(r_fake: Array) -> tuple[Array, Array, Array]:
+            xi, eta, theta = r_fake[..., 0], r_fake[..., 1], r_fake[..., 2]
+            rho_local = np.hypot(xi, eta)
+            phi_local = np.arctan2(eta, xi)
+            return rho_local, phi_local, theta
+
+        def safe_bessel_over_rho(rho: Array) -> Array:
+            """J_n(kc*rho)/rho, regularized at rho=0 -- the tube's own core
+            circle -- identical reasoning/limit to `CylindricalCavity`'s
+            on-axis regularization (module1 doc Section 2.8 step 3)."""
+            with np.errstate(divide="ignore", invalid="ignore"):
+                ratio = special.jv(n, kc * rho) / rho
+            limit = kc / 2.0 if n == 1 else 0.0
+            return np.where(rho < rho_tol, limit, ratio)
+
+        if self.mode.kind == "TM":
+            def Z(theta: Array) -> Array:
+                return np.cos(l * theta)
+
+            def dZ_ds(theta: Array) -> Array:
+                return -(l / R) * np.sin(l * theta)
+        else:
+            def Z(theta: Array) -> Array:
+                return np.sin(l * theta)
+
+            def dZ_ds(theta: Array) -> Array:
+                return (l / R) * np.cos(l * theta)
+
+        def Phi(r_fake: Array) -> Array:
+            rho_local, phi_local, theta = local_to_polar(r_fake)
+            return amp * special.jv(n, kc * rho_local) * np.cos(n * phi_local) * Z(theta)
+
+        def _grad_t(r_fake: Array, envelope: Callable[[Array], Array]) -> Array:
+            rho_local, phi_local, theta = local_to_polar(r_fake)
+            radial = amp * kc * special.jvp(n, kc * rho_local, 1) * np.cos(n * phi_local) * envelope(theta)
+            azimuthal = amp * (-n) * safe_bessel_over_rho(rho_local) * np.sin(n * phi_local) * envelope(theta)
+            cosphi, sinphi = np.cos(phi_local), np.sin(phi_local)
+            out = np.zeros(r_fake.shape, dtype=complex)
+            out[..., 0] = radial * cosphi - azimuthal * sinphi
+            out[..., 1] = radial * sinphi + azimuthal * cosphi
+            return out
+
+        def grad_t_Phi(r_fake: Array) -> Array:
+            return _grad_t(r_fake, Z)
+
+        def grad_t_dPhi_ds(r_fake: Array) -> Array:
+            return _grad_t(r_fake, dZ_ds)
+
+        return Phi, grad_t_Phi, grad_t_dPhi_ds
+
+    def _radial_quadratures(self) -> tuple[float, float]:
+        """Identical role/formula to `CylindricalCavity`'s own (module1 doc
+        Section 2.5): rho_local ranges over [0, a] exactly as that class's
+        rho does, so both cached 1-D quadratures reuse the same integrands."""
+        a, n, kc = self.a, self._n, self._kc
+        I_deriv, _ = integrate.quad(lambda rho: rho * special.jvp(n, kc * rho, 1) ** 2, 0, a)
+        if n == 0:
+            I_over_rho = 0.0
+        else:
+            I_over_rho, _ = integrate.quad(lambda rho: special.jv(n, kc * rho) ** 2 / rho, 0, a)
+        return I_deriv, I_over_rho
+
+    def _to_local(self, r: Array) -> tuple[Array, Array, tuple[int, ...]]:
+        r_arr = np.asarray(r, dtype=float)
+        orig_shape = r_arr.shape
+        pts = np.atleast_2d(r_arr)
+        x, y, z = pts[..., 0], pts[..., 1], pts[..., 2]
+        theta = np.arctan2(y, x)
+        rho_big = np.hypot(x, y)
+        xi = rho_big - self.R
+        eta = z
+        r_fake = np.stack([xi, eta, theta], axis=-1)
+        return r_fake, theta, orig_shape
+
+    def _rotate_to_cartesian(self, local_vec: Array, theta: Array) -> Array:
+        """Local-frame components (index 0/1/2 <-> xi/eta/theta directions)
+        -> true Cartesian. The local frame is (e_rho(theta), e_z,
+        e_theta(theta)) with e_rho=(cos,sin,0), e_theta=(-sin,cos,0) --
+        `e_rho x e_z = -e_theta`, so the axial (index-2) component must map
+        to *minus* e_theta to keep this a right-handed triple (index0 x
+        index1 = index2), the same convention `tez_tmz_fields`'s internal
+        `zhat_cross` assumes; verified directly via the curl-residual
+        convergence test, not just asserted -- getting this sign wrong
+        produces curl E ~= +j*omega*mu*H instead of the required -j*omega*
+        mu*H, caught immediately as a large (~2x), a/R-independent residual
+        rather than one that shrinks with a/R."""
+        cos_t, sin_t = np.cos(theta), np.sin(theta)
+        out = np.zeros(local_vec.shape, dtype=complex)
+        out[..., 0] = local_vec[..., 0] * cos_t + local_vec[..., 2] * sin_t
+        out[..., 1] = local_vec[..., 0] * sin_t - local_vec[..., 2] * cos_t
+        out[..., 2] = local_vec[..., 1]
+        return out
+
+    def E(self, r: Array) -> Array:
+        r_fake, theta, orig_shape = self._to_local(r)
+        return self._rotate_to_cartesian(self._E_local(r_fake), theta).reshape(orig_shape)
+
+    def H(self, r: Array) -> Array:
+        r_fake, theta, orig_shape = self._to_local(r)
+        return self._rotate_to_cartesian(self._H_local(r_fake), theta).reshape(orig_shape)
+
+    @property
+    def f0(self) -> float:
+        return self._f0
+
+    @property
+    def epsilon_bg(self) -> complex:
+        return self.eps
+
+    @property
+    def mu_bg(self) -> complex:
+        return self.mu
+
+    def stored_energy_density(self, r: Array) -> tuple[Array, Array]:
+        e = self.E(r)
+        h = self.H(r)
+        w_e = self.eps / 2.0 * np.sum(np.abs(e) ** 2, axis=-1)
+        w_m = self.mu / 2.0 * np.sum(np.abs(h) ** 2, axis=-1)
+        return w_e, w_m
+
+    def total_stored_energy(self) -> float:
+        """Closed form: same cross-section (radial/phi) closed forms as
+        `CylindricalCavity.total_stored_energy` (module1 doc Section 2.5),
+        times the periodic theta-integral (`numerics.periodic_cos2_integral`/
+        `periodic_sin2_integral`) in place of that class's `cos2_integral`/
+        `sin2_integral`, times an *explicit extra factor of R*: the
+        thin-limit volume element is `dV ~= R*rho_local*d(rho_local)*
+        d(phi_local)*d(theta)`, and unlike `CylindricalCavity`'s z-integral
+        (already a true-length integral, R-free), the periodic theta-integral
+        is dimensionless (an integral over a bare angle) and needs this
+        multiplier to become an actual arc-length volume element -- verified
+        directly against brute-force Cartesian quadrature
+        (test_toroidal_total_stored_energy_matches_brute_force_quadrature),
+        not just asserted, per CLAUDE.md's Conventions warning about this
+        exact class of silent scale bug."""
+        n, l, R = self._n, self._l, self.R
+        amp2 = abs(self.amplitude) ** 2
+        kc, k_c2 = self._kc, self._k_c2
+        phi_cos = _num.phi_cos2_integral(n)
+        phi_sin = _num.phi_sin2_integral(n)
+        Th_cos = _num.periodic_cos2_integral(l)
+        Th_sin = _num.periodic_sin2_integral(l)
+
+        if self.mode.kind == "TM":
+            I_bessel = _num.bessel_tm_radial_integral(n, self._X, self.a)
+            int_Ez2 = amp2 * I_bessel * phi_cos * Th_cos
+            int_Erho2 = amp2 * (l / (R * kc)) ** 2 * self._I_deriv * phi_cos * Th_sin
+            int_Ephi2 = amp2 * (n * l / (R * k_c2)) ** 2 * self._I_over_rho * phi_sin * Th_sin
+            int_E2 = int_Ez2 + int_Erho2 + int_Ephi2
+        else:
+            omega_mu = self._omega * self.mu
+            int_Erho2 = amp2 * (omega_mu * n / k_c2) ** 2 * self._I_over_rho * phi_sin * Th_sin
+            int_Ephi2 = amp2 * (omega_mu / kc) ** 2 * self._I_deriv * phi_cos * Th_sin
+            int_E2 = int_Erho2 + int_Ephi2
+
+        return self.eps / 2.0 * R * int_E2
+
+    def Q_wall(self, Rs: float) -> float:
+        """Closed form: a *single* curved-surface term (module1 doc's
+        general master formula, Section 0.3) -- unlike `CylindricalCavity`,
+        there are no end caps (the tube is a closed ring). Surface element
+        `dA ~= a*R*d(phi_local)*d(theta)` -- same explicit-extra-R-factor
+        reasoning as `total_stored_energy` above (the curved-wall integral
+        reuses `CylindricalCavity`'s own `a*d(phi)*d(z)` surface-element
+        structure, and needs the same R multiplier for the same
+        dimensionless-periodic-integral reason); verified against
+        brute-force Cartesian surface quadrature
+        (test_toroidal_q_wall_matches_numerical_surface_integral), not just
+        asserted."""
+        n, l, R, a = self._n, self._l, self.R, self.a
+        amp2 = abs(self.amplitude) ** 2
+        kc, k_c2 = self._kc, self._k_c2
+        phi_cos = _num.phi_cos2_integral(n)
+        phi_sin = _num.phi_sin2_integral(n)
+        Th_cos = _num.periodic_cos2_integral(l)
+        Th_sin = _num.periodic_sin2_integral(l)
+
+        if self.mode.kind == "TM":
+            omega_eps = self._omega * self.eps
+            J_np1 = special.jv(n + 1, self._X)
+            Hphi_a2 = amp2 * (omega_eps / kc) ** 2 * J_np1**2
+            curved = a * R * Hphi_a2 * phi_cos * Th_cos
+        else:
+            pref_phi = amp2 * (n * l / (R * k_c2)) ** 2
+            J_n = special.jv(n, self._X)
+            Hphi_a2 = pref_phi * (J_n / a) ** 2
+            Hz_a2 = amp2 * J_n**2
+            curved = a * R * (Hphi_a2 * phi_sin * Th_cos + Hz_a2 * phi_cos * Th_sin)
+
+        p_loss = Rs / 2.0 * curved
+        w = self.total_stored_energy()
+        return self._omega * w / p_loss
+
+    def bounding_box(self) -> tuple[Array, Array]:
+        R, a = self.R, self.a
+        return np.array([-(R + a), -(R + a), -a]), np.array([R + a, R + a, a])
+
+    def contains(self, r: Array) -> Array:
+        r = np.atleast_2d(np.asarray(r, dtype=float))
+        x, y, z = r[..., 0], r[..., 1], r[..., 2]
+        rho_big = np.hypot(x, y)
+        return (rho_big - self.R) ** 2 + z**2 <= self.a**2
